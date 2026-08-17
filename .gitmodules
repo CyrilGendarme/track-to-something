@@ -1,0 +1,3 @@
+[submodule "submodules/rekordbox-databridge"]
+	path = submodules/rekordbox-databridge
+	url = git@github.com:CyrilGendarme/rekordbox-databridge.git
