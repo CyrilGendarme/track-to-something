@@ -77,7 +77,7 @@ class AnalysisWorker(QueuedWorker):
                 "bass": item.bass_energy,           # 0-1
                 "mid": item.mid_energy,              # 0-1
                 "high": item.high_energy,            # 0-1
-                "centroid_hz": item.spectral_centroid_hz or 0.0,  # Hz
+                # REMOVED: spectral_centroid_hz (not used in visualization, 2-4ms saved)
                 "amplitude": item.overall_amplitude, # 0-1 (volume envelope)
                 "rms": item.rms,                     # 0-1 (smooth volume)
                 "peak": item.peak,                   # 0-1 (transient spikes)
@@ -126,11 +126,9 @@ class AnalysisWorker(QueuedWorker):
         
         # 4. Create RENDERING MESSAGE (combination of events + continuous)
         with perf.timing_context("analysis:render_message_creation"):
-            # Normalize spectral centroid to 0-1 (20Hz to 20kHz is typical range)
-            brightness = 0.0
-            if item.spectral_centroid_hz is not None:
-                # Map 20-20000 Hz to 0-1
-                brightness = max(0.0, min(1.0, (item.spectral_centroid_hz - 20) / (20000 - 20)))
+            # Brightness: derived from spectral centroid (REMOVED for performance)
+            # Setting to fixed value based on high energy as approximation
+            brightness = item.high_energy  # Use high energy as brightness proxy
             
             # Overall energy normalization
             overall_energy = max(item.bass_energy, item.mid_energy, item.high_energy)
