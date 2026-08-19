@@ -38,15 +38,23 @@ def _filter_duplicate_devices(devices: list[AudioDevice]) -> list[AudioDevice]:
     """
     if not devices:
         return devices
+
+    # Rule 1: Filter out "well know" trash devices
+    trash_name_regex = [
+        # "Microphone Array (AMD Audio Dev",
+                        "Microphone (Realtek HD Audio Mic"
+                        "Input (VB-Audio)"]
+    devices = [d for d in devices if all(trash not in d.name for trash in trash_name_regex)]
     
-    # Rule 1: Filter to 44100Hz only
-    devices_44k = [d for d in devices if d.sample_rate == 44100]
-    logger.info(f"After 44100Hz filter: {len(devices_44k)} devices (from {len(devices)})")
     
-    # Rule 2: Keep only one VB-Audio device
+    # Rule 2: Filter to 44100Hz only
+    devices = [d for d in devices if d.sample_rate == 44100]
+    logger.info(f"After 44100Hz filter: {len(devices)})")
+    
+    # Rule 3: Keep only one VB-Audio device
     vb_audio_seen = False
     filtered = []
-    for device in devices_44k:
+    for device in devices:
         if "vb-audio" in device.name.lower():
             if not vb_audio_seen:
                 filtered.append(device)
@@ -57,37 +65,40 @@ def _filter_duplicate_devices(devices: list[AudioDevice]) -> list[AudioDevice]:
         else:
             filtered.append(device)
     
-    # Rule 3: For duplicates with same base name, prefer 1-channel (mono) over 2-channel (stereo)
-    # Group by device name prefix (before parentheses or special identifiers)
-    name_groups: dict[str, list[AudioDevice]] = {}
-    for device in filtered:
-        # Extract base name (everything before parentheses or special markers)
-        base_name = device.name.split('(')[0].strip()
-        if base_name not in name_groups:
-            name_groups[base_name] = []
-        name_groups[base_name].append(device)
     
-    final_devices = []
-    for base_name, group in name_groups.items():
-        if len(group) > 1:
-            # Multiple devices with same base name - prefer mono (1-channel)
-            mono_devices = [d for d in group if d.channels == 1]
-            if mono_devices:
-                # Keep mono version
-                final_devices.extend(mono_devices)
-                stereo_removed = [d.name for d in group if d.channels != 1]
-                logger.info(f"Keeping mono version of '{base_name}', removed stereo: {stereo_removed}")
-            else:
-                # No mono version, keep first occurrence
-                final_devices.append(group[0])
-                removed = [d.name for d in group[1:]]
-                logger.info(f"Removed duplicate '{base_name}' variants: {removed}")
-        else:
-            # Only one device with this name
-            final_devices.extend(group)
+    return filtered
     
-    logger.info(f"After deduplication: {len(final_devices)} devices")
-    return final_devices
+    # # Rule 3: For duplicates with same base name, prefer 1-channel (mono) over 2-channel (stereo)
+    # # Group by device name prefix (before parentheses or special identifiers)
+    # name_groups: dict[str, list[AudioDevice]] = {}
+    # for device in filtered:
+    #     # Extract base name (everything before parentheses or special markers)
+    #     base_name = device.name.split('(')[0].strip()
+    #     if base_name not in name_groups:
+    #         name_groups[base_name] = []
+    #     name_groups[base_name].append(device)
+    
+    # final_devices = []
+    # for base_name, group in name_groups.items():
+    #     if len(group) > 1:
+    #         # Multiple devices with same base name - prefer mono (1-channel)
+    #         mono_devices = [d for d in group if d.channels == 1]
+    #         if mono_devices:
+    #             # Keep mono version
+    #             final_devices.extend(mono_devices)
+    #             stereo_removed = [d.name for d in group if d.channels != 1]
+    #             logger.info(f"Keeping mono version of '{base_name}', removed stereo: {stereo_removed}")
+    #         else:
+    #             # No mono version, keep first occurrence
+    #             final_devices.append(group[0])
+    #             removed = [d.name for d in group[1:]]
+    #             logger.info(f"Removed duplicate '{base_name}' variants: {removed}")
+    #     else:
+    #         # Only one device with this name
+    #         final_devices.extend(group)
+    
+    # logger.info(f"After deduplication: {len(final_devices)} devices")
+    # return final_devices
 
 
 def get_available_audio_devices() -> list[AudioDevice]:

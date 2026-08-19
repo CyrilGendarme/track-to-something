@@ -259,6 +259,7 @@ class AudioProcessingWorker(QueuedWorker):
                             max_flux = float(np.max(flux))
                             beat_confidence = min(1.0, (max_flux / flux_mean - 1.0) / 5.0)
                             beat_detected = beat_confidence > 0.3  # Only beats with >30% confidence
+                            logger.info(f"[{self.name}] BEAT DETECTED @ {self.timestamp:.3f}s: confidence={beat_confidence:.2f}, amp={overall_amplitude:.3f}, rms={rms:.3f}, flux_max={max_flux:.3f}")
                     else:
                         onset_detected = False
                 else:
@@ -272,6 +273,9 @@ class AudioProcessingWorker(QueuedWorker):
                         beat_confidence = min(1.0, (overall_amplitude / beat_threshold) / 3.0)
                     else:
                         beat_confidence = 0.0
+                    
+                    if beat_detected:
+                        logger.info(f"[{self.name}] BEAT (FALLBACK) @ {self.timestamp:.3f}s: confidence={beat_confidence:.2f}, amp={overall_amplitude:.3f}")
             
             # Cache magnitude for next frame's beat/onset detection
             self._prev_magnitude = magnitude.copy()

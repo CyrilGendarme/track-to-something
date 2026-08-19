@@ -21,6 +21,7 @@ from .settings import (
     FAST_WINDOW_MS,
     MEDIUM_WINDOW_MS,
     SLOW_WINDOW_MS,
+    BEAT_ANALYSIS_WINDOW_MS,
     BEAT_HISTORY_SIZE,
     TONALITY_HISTORY_SIZE,
     # Tiered analysis decimation

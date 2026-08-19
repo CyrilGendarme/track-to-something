@@ -79,6 +79,14 @@ MEDIUM_WINDOW_MS: Final[float] = float(os.getenv("MOSHPRO_MEDIUM_WINDOW_MS", "32
 # More history helps tonality detection converge to true key without jitter
 SLOW_WINDOW_MS: Final[float] = float(os.getenv("MOSHPRO_SLOW_WINDOW_MS", "150.0"))
 
+# Beat/Tempo analysis window (for BPM calculation)
+# CRITICAL: Must be MUCH LONGER than other windows to capture multiple beats
+# At 120 BPM: beats every ~500ms → need 2+ seconds for 4+ beats
+# At 100 BPM: beats every ~600ms → need 2.4+ seconds for 4+ beats
+# 2000ms (2 seconds) = ~4 beats at 120 BPM = good BPM resolution
+# Separate from SLOW_WINDOW_MS because beat patterns span multiple STFT windows
+BEAT_ANALYSIS_WINDOW_MS: Final[float] = float(os.getenv("MOSHPRO_BEAT_ANALYSIS_WINDOW_MS", "2000.0"))
+
 # Max beat history for tempo/BPM estimation
 # More history = more stable tempo but slower adaptation
 # Increased to 10: CPU is good, need stable tempo for accurate tonality detection

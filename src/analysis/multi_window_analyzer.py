@@ -22,6 +22,7 @@ from src.config import (
     FAST_WINDOW_MS,
     MEDIUM_WINDOW_MS,
     SLOW_WINDOW_MS,
+    BEAT_ANALYSIS_WINDOW_MS,
 )
 from src.analysis.tiers import (
     FastFeatures,
@@ -48,6 +49,7 @@ class MultiWindowAudioAnalyzer:
         fast_window_ms: float = FAST_WINDOW_MS,
         medium_window_ms: float = MEDIUM_WINDOW_MS,
         slow_window_ms: float = SLOW_WINDOW_MS,
+        beat_analysis_window_ms: float = BEAT_ANALYSIS_WINDOW_MS,
     ):
         """Initialize multi-window analyzer.
         
@@ -56,15 +58,18 @@ class MultiWindowAudioAnalyzer:
             fast_window_ms: Window size for fast analysis (default from config)
             medium_window_ms: Window size for medium analysis (default from config)
             slow_window_ms: Window size for slow analysis (default from config)
+            beat_analysis_window_ms: Window size for beat/tempo analysis (default from config)
         """
         self.sample_rate = sample_rate
         
         self.fast_analyzer = FastAnalyzer(sample_rate, fast_window_ms)
         self.medium_analyzer = MediumAnalyzer(sample_rate, medium_window_ms)
-        self.slow_analyzer = SlowAnalyzer(sample_rate, slow_window_ms)
+        self.slow_analyzer = SlowAnalyzer(sample_rate, slow_window_ms, beat_analysis_window_ms)
         
-        # Shared circular buffer (small, 50-100ms)
-        self.buffer_size_ms = 100.0
+        # Shared circular buffer MUST be large enough for beat analysis window
+        # Beat analysis window is typically 2 seconds for BPM calculation
+        # Increase buffer to 2.5x beat analysis window to have enough history
+        self.buffer_size_ms = max(100.0, beat_analysis_window_ms * 2.5)  # At least 2.5x beat window
         self.buffer_size_samples = int(self.buffer_size_ms * sample_rate / 1000)
         self.circular_buffer = np.zeros((self.buffer_size_samples, 2), dtype=np.float32)
         self.write_pos = 0
@@ -123,6 +128,7 @@ class MultiWindowAudioAnalyzer:
         """Run all three analyzers on current buffer state.
         
         Feeds FAST/MEDIUM features into SlowAnalyzer for better aggregation.
+        Uses LONGER window for beat/tempo analysis to capture multiple beats.
         
         Args:
             timestamp_s: Current timestamp
@@ -134,10 +140,15 @@ class MultiWindowAudioAnalyzer:
         # Request 1.5x window size to ensure we have enough data
         fast_duration_ms = (self.fast_analyzer.window_size_samples / self.sample_rate) * 1000 * 1.5
         medium_duration_ms = (self.medium_analyzer.window_size_samples / self.sample_rate) * 1000 * 1.5
+        
+        # CRITICAL: Use beat_analysis_window_ms (2s) not slow_window_ms (150ms) for beat analysis
+        # 150ms is too short to contain multiple beats; 2s captures ~4 beats at 120 BPM
+        beat_analysis_duration_ms = self.slow_analyzer.beat_analysis_window_ms * 1.5
         slow_duration_ms = (self.slow_analyzer.window_size_samples / self.sample_rate) * 1000 * 1.5
         
         fast_audio = self.get_recent_audio(fast_duration_ms)
         medium_audio = self.get_recent_audio(medium_duration_ms)
+        beat_audio = self.get_recent_audio(beat_analysis_duration_ms)  # Longer for beat analysis
         slow_audio = self.get_recent_audio(slow_duration_ms)
         
         # Run FAST and MEDIUM analyses
@@ -157,8 +168,11 @@ class MultiWindowAudioAnalyzer:
             beat_confidence=self.last_beat_confidence,  # Use recorded beat confidence
         )
         
-        # Run SLOW analysis with all metrics aggregated
+        # Run SLOW analysis with normal window for overall metrics
         slow_features = self.slow_analyzer.analyze(slow_audio, timestamp_s)
+        
+        # Run beat/tempo analysis with LONGER window to capture multiple beats
+        slow_features = self.slow_analyzer.analyze_beat_tempo(beat_audio, slow_features)
         
         return fast_features, medium_features, slow_features
     
@@ -171,3 +185,4 @@ class MultiWindowAudioAnalyzer:
         """
         self.last_beat_confidence = beat_confidence
         self.slow_analyzer.record_beat(timestamp_s)
+        logger.info(f"[MultiWindowAnalyzer] Beat recorded @ {timestamp_s:.3f}s (confidence={beat_confidence:.2f})")
