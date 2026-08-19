@@ -116,7 +116,7 @@ class AudioCaptureWorker(Worker):
         # Handle both mono and multi-channel
         if samples.ndim == 1:
             # Mono: apply filter directly
-            filtered, _ = scipy_signal.lfilter(
+            filtered = scipy_signal.lfilter(
                 self._hpf_b, self._hpf_a, samples
             )
             return filtered
@@ -124,7 +124,7 @@ class AudioCaptureWorker(Worker):
             # Multi-channel: apply filter to each channel
             filtered = np.zeros_like(samples)
             for ch in range(samples.shape[1]):
-                filtered[:, ch], _ = scipy_signal.lfilter(
+                filtered[:, ch] = scipy_signal.lfilter(
                     self._hpf_b, self._hpf_a, samples[:, ch]
                 )
             return filtered
