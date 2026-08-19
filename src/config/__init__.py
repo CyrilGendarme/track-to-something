@@ -12,6 +12,9 @@ from .settings import (
     # Audio capture & processing
     DEFAULT_SAMPLE_RATE,
     AUDIO_CHUNK_SIZE,
+    AUDIO_BIT_DEPTH,
+    AUDIO_CHANNELS,
+    AUDIO_APPLY_HPF,
     # Buffer
     BUFFER_CAPACITY_SECONDS,
     # Analysis windows
@@ -36,9 +39,6 @@ from .settings import (
     # Threading
     NUM_PROCESSING_WORKERS,
     OUTPUT_QUEUE_MAXSIZE,
-    # Audio input
-    USB_DEFAULT_SAMPLE_RATE,
-    LOOPBACK_DEFAULT_SAMPLE_RATE,
     # Detection thresholds
     ONSET_THRESHOLD,
     BEAT_CONFIDENCE_THRESHOLD,

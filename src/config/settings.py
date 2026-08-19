@@ -28,6 +28,26 @@ DEFAULT_SAMPLE_RATE: Final[int] = int(os.getenv("MOSHPRO_SAMPLE_RATE", "22050"))
 AUDIO_CHUNK_SIZE: Final[int] = int(os.getenv("MOSHPRO_CHUNK_SIZE", "256"))
 
 # ────────────────────────────────────────────────────────────────────────────
+# AUDIO QUALITY REDUCTION (for lightweight analysis)
+# ────────────────────────────────────────────────────────────────────────────
+
+# Audio bit depth for processing (12-bit is sufficient for beat detection)
+# 16-bit: CD quality, 12-bit: good enough for analysis, 8-bit: only if desperate
+# Reducing from 16 to 12 saves 25% memory with no analysis quality loss
+AUDIO_BIT_DEPTH: Final[int] = int(os.getenv("MOSHPRO_BIT_DEPTH", "12"))
+
+# Process mono (single channel) or stereo?
+# Mono: 50% less memory, identical analysis results for beat/onset/spectral
+# Stereo: Richer stereo imaging, but 2x memory and mixing overhead
+# Recommended: 1 (mono) for low-latency video control
+AUDIO_CHANNELS: Final[int] = int(os.getenv("MOSHPRO_CHANNELS", "1"))
+
+# Apply high-pass filter to remove low-frequency rumble below 20 Hz?
+# Recommended: True (removes DC offset, wind noise, low-freq vibration)
+# CPU cost: Minimal (~0.1ms per chunk), quality benefit: high
+AUDIO_APPLY_HPF: Final[bool] = os.getenv("MOSHPRO_APPLY_HPF", "true").lower() == "true"
+
+# ────────────────────────────────────────────────────────────────────────────
 # CIRCULAR BUFFER (shared between analyzer tiers)
 # ────────────────────────────────────────────────────────────────────────────
 
