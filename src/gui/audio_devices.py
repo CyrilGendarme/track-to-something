@@ -41,8 +41,8 @@ def _filter_duplicate_devices(devices: list[AudioDevice]) -> list[AudioDevice]:
 
     # Rule 1: Filter out "well know" trash devices
     trash_name_regex = [
-        # "Microphone Array (AMD Audio Dev",
-                        "Microphone (Realtek HD Audio Mic"
+        "Microphone Array (AMD Audio Dev",
+                        # "Microphone (Realtek HD Audio Mic"
                         "Input (VB-Audio)"]
     devices = [d for d in devices if all(trash not in d.name for trash in trash_name_regex)]
     

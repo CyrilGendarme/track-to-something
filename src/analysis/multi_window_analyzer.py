@@ -127,6 +127,9 @@ class MultiWindowAudioAnalyzer:
     def analyze_all(self, timestamp_s: float) -> tuple[FastFeatures, MediumFeatures, SlowFeatures]:
         """Run all three analyzers on current buffer state.
         
+        THREAD-SAFE: Can be called by multiple processing workers simultaneously.
+        Uses lock to prevent race conditions with record_beat_detection.
+        
         Feeds FAST/MEDIUM features into SlowAnalyzer for better aggregation.
         Uses LONGER window for beat/tempo analysis to capture multiple beats.
         
@@ -155,34 +158,40 @@ class MultiWindowAudioAnalyzer:
         fast_features = self.fast_analyzer.analyze(fast_audio, timestamp_s)
         medium_features = self.medium_analyzer.analyze(medium_audio, timestamp_s)
         
-        # Feed FAST/MEDIUM metrics into SlowAnalyzer for aggregation
-        # This allows slow tier to accumulate metrics for better trends
-        # Use last recorded beat confidence for accurate beat tracking
-        self.slow_analyzer.update_metrics(
-            overall_amplitude=fast_features.raw_energy,
-            rms=fast_features.raw_energy,  # Use raw_energy as proxy for RMS
-            bass_energy=medium_features.bass_energy,
-            mid_energy=medium_features.mid_energy,
-            high_energy=medium_features.high_energy,
-            onset_detected=fast_features.onset_detected,
-            beat_confidence=self.last_beat_confidence,  # Use recorded beat confidence
-        )
-        
-        # Run SLOW analysis with normal window for overall metrics
-        slow_features = self.slow_analyzer.analyze(slow_audio, timestamp_s)
-        
-        # Run beat/tempo analysis with LONGER window to capture multiple beats
-        slow_features = self.slow_analyzer.analyze_beat_tempo(beat_audio, slow_features)
+        # Lock while accessing shared slow analyzer state
+        # Prevents race condition with record_beat_detection
+        with self.lock:
+            # Feed FAST/MEDIUM metrics into SlowAnalyzer for aggregation
+            # This allows slow tier to accumulate metrics for better trends
+            # Use last recorded beat confidence for accurate beat tracking
+            self.slow_analyzer.update_metrics(
+                overall_amplitude=fast_features.raw_energy,
+                rms=fast_features.raw_energy,  # Use raw_energy as proxy for RMS
+                bass_energy=medium_features.bass_energy,
+                mid_energy=medium_features.mid_energy,
+                high_energy=medium_features.high_energy,
+                onset_detected=fast_features.onset_detected,
+                beat_confidence=self.last_beat_confidence,  # Use recorded beat confidence
+            )
+            
+            # Run SLOW analysis with normal window for overall metrics
+            slow_features = self.slow_analyzer.analyze(slow_audio, timestamp_s)
+            
+            # Run beat/tempo analysis with LONGER window to capture multiple beats
+            slow_features = self.slow_analyzer.analyze_beat_tempo(beat_audio, slow_features)
         
         return fast_features, medium_features, slow_features
     
     def record_beat_detection(self, timestamp_s: float, beat_confidence: float = 1.0) -> None:
         """Record beat for tempo tracking.
         
+        THREAD-SAFE: Can be called by multiple processing workers simultaneously
+        
         Args:
             timestamp_s: Timestamp of beat detection
             beat_confidence: Confidence in beat detection (0-1)
         """
-        self.last_beat_confidence = beat_confidence
-        self.slow_analyzer.record_beat(timestamp_s)
-        logger.info(f"[MultiWindowAnalyzer] Beat recorded @ {timestamp_s:.3f}s (confidence={beat_confidence:.2f})")
+        with self.lock:  # Thread-safe: multiple workers may call this
+            self.last_beat_confidence = beat_confidence
+            self.slow_analyzer.record_beat(timestamp_s)
+            logger.info(f"[MultiWindowAnalyzer] Beat recorded @ {timestamp_s:.3f}s (confidence={beat_confidence:.2f})")

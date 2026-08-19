@@ -14,6 +14,7 @@ from src.config import (
     OUTPUT_QUEUE_MAXSIZE,
 )
 from src.analysis.tiers.features import FastFeatures, MediumFeatures, SlowFeatures
+from src.analysis.multi_window_analyzer import MultiWindowAudioAnalyzer
 from .buffer import CircularAudioBuffer
 from .capture_worker import AudioCaptureWorker
 from .processing_worker import AudioProcessingWorker
@@ -101,6 +102,12 @@ class AudioPipeline:
         # Feature cache for GUI access (thread-safe)
         self.feature_cache = FeatureCache()
         
+        # Shared multi-window analyzer (CRITICAL: one instance for all workers!)
+        # This ensures all parallel workers feed beats into the SAME tempo tracker
+        # so they accumulate for BPM calculation
+        self.multi_analyzer = MultiWindowAudioAnalyzer(sample_rate=sample_rate)
+        logger.info(f"[Pipeline] Created shared MultiWindowAnalyzer for all {n_processing_workers} workers")
+        
         # Worker threads
         self.capture_worker = AudioCaptureWorker(
             "Capture",
@@ -116,6 +123,7 @@ class AudioPipeline:
                 input_queue=self.capture_queue,
                 output_queue=self.features_queue,
                 feature_cache=self.feature_cache,
+                multi_analyzer=self.multi_analyzer,  # SHARED across all workers!
                 daemon=True,
             )
             for i in range(n_processing_workers)

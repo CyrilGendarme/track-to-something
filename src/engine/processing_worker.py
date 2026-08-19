@@ -129,6 +129,7 @@ class AudioProcessingWorker(QueuedWorker):
         n_fft: int = STFT_FFT_SIZE,
         hop_length: int = STFT_HOP_LENGTH,
         feature_cache: "FeatureCache | None" = None,
+        multi_analyzer: "MultiWindowAudioAnalyzer | None" = None,
         daemon: bool = False,
     ):
         """Initialize audio processing worker.
@@ -140,6 +141,7 @@ class AudioProcessingWorker(QueuedWorker):
             n_fft: FFT size for analysis (default from config)
             hop_length: Hop length for STFT (default from config)
             feature_cache: Optional FeatureCache for storing tiered features for GUI
+            multi_analyzer: SHARED MultiWindowAudioAnalyzer (passed from pipeline)
             daemon: If True, thread will not prevent program exit
         """
         super().__init__(name=name, input_queue=input_queue, daemon=daemon)
@@ -160,9 +162,16 @@ class AudioProcessingWorker(QueuedWorker):
         self._prev_magnitude: np.ndarray | None = None
         self._prev_frame_energy: np.ndarray | None = None
         
-        # Multi-window analyzer for complete tiered analysis
-        from src.analysis import MultiWindowAudioAnalyzer
-        self.multi_analyzer = MultiWindowAudioAnalyzer(sample_rate=DEFAULT_SAMPLE_RATE)
+        # Use SHARED multi-window analyzer (passed from pipeline)
+        # This ensures all parallel workers feed beats into the SAME tempo tracker
+        if multi_analyzer is None:
+            # Fallback if not provided (backward compatibility)
+            from src.analysis import MultiWindowAudioAnalyzer
+            self.multi_analyzer = MultiWindowAudioAnalyzer(sample_rate=DEFAULT_SAMPLE_RATE)
+            logger.warning(f"[{name}] No shared multi_analyzer provided, creating own (beats won't be shared)")
+        else:
+            self.multi_analyzer = multi_analyzer
+            logger.debug(f"[{name}] Using shared MultiWindowAnalyzer for beat aggregation")
 
     def _process_item(self, item: AudioChunkMessage) -> None:
         """Analyze audio chunk with TIERED ANALYSIS strategy.
