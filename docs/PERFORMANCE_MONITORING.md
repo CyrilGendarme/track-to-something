@@ -11,6 +11,77 @@ The performance monitoring system tracks timing for every important operation in
 - **Slow operations** (>30ms logged in real-time to console)
 - **Periodic summaries** organized by slowest operations
 
+## Optimization Strategy: Tiered Analysis
+
+The audio engine implements **tiered analysis** to balance latency and CPU load:
+
+### Three-Tier Architecture
+
+```
+FAST TIER (Every chunk, ~5-10ms latency)
+├─ Overall amplitude (RMS, peak, max)
+├─ Beat detection (envelope-based, no STFT)
+└─ Onset detection (spectral flux, no librosa)
+   Use for: Kick flash, snare burst, immediate effects
+
+MEDIUM TIER (Every 2-3 chunks, ~20-50ms latency)
+├─ Full STFT spectral analysis
+├─ Spectral centroid (brightness)
+├─ Frequency band energy (bass, mid, high)
+└─ Band envelopes for visualization
+   Use for: Smooth animations, energy tracking
+
+SLOW TIER (Every 8+ chunks, ~300-700ms latency)
+└─ Tempo/BPM estimation
+   Use for: Scene changes, animation speed
+```
+
+### Configuration
+
+Adjust tier speeds with environment variables:
+
+```bash
+# Decimation factors (skip N chunks for expensive operations)
+MOSHPRO_SPECTRAL_DECIMATION=2      # Run spectral every 2 chunks (~90ms)
+MOSHPRO_TEMPO_DECIMATION=8         # Run tempo every 8 chunks (~370ms)
+
+# Number of processing workers (reduced from 4 to 2 for GIL efficiency)
+MOSHPRO_PROCESSING_WORKERS=2       # Fewer workers = less GIL contention
+```
+
+### Expected Performance Gains
+
+With tiered analysis optimizations:
+
+**Before Optimization:**
+- Onset detection: 30-128ms (librosa.onset.onset_strength overhead)
+- Queue operations: 40-240ms (saturation feedback loop)
+- Processing workers: 4 (high GIL lock contention)
+
+**After Optimization:**
+- Onset detection: ~2-5ms (spectral flux, no librosa call)
+- Queue operations: 10-50ms (reduced load + fewer workers)
+- Processing workers: 2 (reduced GIL contention)
+- **Overall throughput: 3-5x improvement**
+
+### Implementation Details
+
+#### Fast Tier (ALWAYS runs every chunk)
+- Amplitude metrics: O(n) operations, ~0.5ms
+- Beat detection: Envelope analysis only, no STFT, ~1ms
+- Onset detection: Spectral flux (cached STFT), ~1-2ms
+- **Total: ~3-5ms per chunk**
+
+#### Medium Tier (Runs every 2-3 chunks)
+- STFT computation: ~10-15ms (still runs, but spread across chunks)
+- Spectral features: ~2-3ms
+- Frequency bands: ~1-2ms
+- **Total: ~15-20ms per chunk (spread every 2-3 chunks)**
+
+#### Slow Tier (Runs every 8+ chunks)
+- Tempo estimation: ~5-10ms (only every ~370ms)
+- BPM calculation: Lightweight
+
 ## Quick Start
 
 ### Enable Basic Monitoring

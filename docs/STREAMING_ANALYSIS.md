@@ -332,3 +332,129 @@ A: ~5-10% when enabled, <1% when disabled. Can turn off in production.
 - [Performance Monitoring Guide](../../docs/PERFORMANCE_MONITORING.md)
 - [Pipeline Architecture](./ARCHITECTURE.md)
 - [Config Tuning](../../config/README.md)
+
+---
+
+## Architecture: Events vs Continuous Signals
+
+The analysis pipeline separates **events** from **continuous signals** to enable both fast reactions and smooth animations:
+
+### Continuous Signals (Drive Smooth Animations)
+
+Continuous values flow constantly through the pipeline, updating at different rates based on tier:
+
+```python
+CONTINUOUS SIGNALS = {
+    "bass": 0.0-1.0,              # Bass intensity (updates every chunk)
+    "mid": 0.0-1.0,               # Vocal/presence energy
+    "high": 0.0-1.0,              # Brightness/air
+    "amplitude": 0.0-1.0,         # Volume envelope
+    "spectral_centroid_hz": 0-20000,  # Overall tone (updates every 2-3 chunks)
+    "rms": 0.0-1.0,               # Smooth volume
+    "peak": 0.0-1.0,              # Transient peaks
+    "dynamics": 0.0-1.0,          # Compression (RMS/peak ratio)
+}
+```
+
+**Uses:**
+- Smooth parameter animations (size, color, distortion)
+- Responsive visualizations that follow audio intensity
+- Energy-based effects (glow, particle size, etc.)
+
+### Events (Fast, Time-Bound Detections)
+
+Events are instantaneous detections that trigger discrete actions:
+
+```python
+EVENTS = {
+    "onset": {
+        "timestamp": 1.234,
+        "strength": 0.95,
+    },
+    "beat": {
+        "timestamp": 1.234,
+        "confidence": 0.87,
+    },
+    "tempo_update": {
+        "timestamp": 1.234,
+        "bpm": 128.5,
+    },
+}
+```
+
+**Uses:**
+- Kick flash (sudden brightness spike)
+- Snare particle burst (emit particles on event)
+- Strobe/beat sync effects (rigid timing)
+- Event callbacks for game/VJ systems
+
+### Key Difference
+
+| Aspect | Continuous | Events |
+|--------|-----------|--------|
+| **Refresh Rate** | Every chunk (46ms) or decimated | Instantaneous detection |
+| **Use Case** | Smooth animations | Discrete triggers |
+| **Latency** | 5-50ms (tiered) | <10ms (fast tier only) |
+| **Data Type** | float value | bool + metadata |
+| **Animation** | Easing/lerp | Immediate/step |
+
+### Example: Bass-Heavy Beat Drop
+
+```
+Timeline:
+0ms:   Bass energy climbs smoothly (0.3 → 0.8)
+250ms: Beat event fires → kick flash effect
+       Bass energy continues animation (0.8 → 0.9)
+       Particle system responds to onset event
+500ms: Tempo confirmed as 128 BPM → adjust animation speed
+```
+
+**Code Flow:**
+```python
+# Continuous signal drives smooth scale
+object.scale = lerp(object.scale, bass_energy * max_scale, 0.1)
+
+# Event triggers discrete effect
+if beat_detected:
+    flash_effect.trigger()
+    particles.burst(onset_strength * 50)
+
+# Tempo drives animation speed
+animation_speed = estimated_bpm / 60.0 * base_speed
+```
+
+### Implementation in Pipeline
+
+1. **Processing Worker** (src/engine/processing_worker.py):
+   - Computes continuous signals (amplitude, energy, spectral features)
+   - Detects events (beat, onset)
+   - Caches previous STFT for event detection
+
+2. **Analysis Worker** (src/engine/analysis_worker.py):
+   - Separates continuous from events
+   - Applies predictive beat sync
+   - Creates rendering message with both
+
+3. **Rendering Worker** (downstream):
+   - Consumes rendering message
+   - Applies continuous animations smoothly
+   - Triggers event callbacks immediately
+
+### Optimization Benefits
+
+By separating events from continuous:
+
+1. **Events use fast tier only** (~5-10ms):
+   - No expensive spectral analysis needed
+   - Immediate reaction time
+   - Beat flash feels responsive
+
+2. **Continuous values scale appropriately**:
+   - Bass energy updates every chunk for smooth dancing
+   - Spectral features update every 2-3 chunks for stable color
+   - Tempo updates every 8 chunks for smooth animation ramps
+
+3. **Predictive beat sync**:
+   - Predict next beat based on tempo stability
+   - Animate ahead of actual detection
+   - Enable flawless game synchronization
