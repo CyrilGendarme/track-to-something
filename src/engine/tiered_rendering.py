@@ -52,8 +52,7 @@ class TieredRenderingMessage:
     high_energy: float                    # 0-1
     
     # Spectral characteristics
-    brightness: float                     # 0-1 (spectral centroid)
-    spectral_centroid_hz: float | None   # Hz
+    brightness: float                     # 0-1 (derived from high/mid bands)
     
     # Change rates (for smooth animation interpolation)
     bass_energy_change_per_sec: float    # Acceleration of bass
@@ -134,12 +133,7 @@ def combine_features(
         bass_energy=medium.bass_energy,
         mid_energy=medium.mid_energy,
         high_energy=medium.high_energy,
-        brightness=medium.spectral_brightness,
-        spectral_centroid_hz=medium.spectral_centroid_hz,
-        bass_energy_change_per_sec=bass_energy_change_per_sec,
-        overall_energy_change_per_sec=overall_energy_change_per_sec,
-        
-        # Tier 3: Slow
+    brightness=(medium.high_energy * 0.8 + medium.mid_energy * 0.4),  # Derived from bands
         average_energy=slow.average_energy,
         energy_variance=slow.energy_variance,
         energy_trend=slow.energy_trend,

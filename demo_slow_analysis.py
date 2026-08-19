@@ -95,7 +95,6 @@ def demo_tonality_detection():
     print(f"    High (4000-20000 Hz): {features.high_energy:.3f} (0-1)")
     
     print(f"\n  SPECTRAL CHARACTERISTICS:")
-    print(f"    Spectral Centroid:    {features.spectral_centroid_hz:.1f} Hz")
     print(f"    Bass Density:         {features.spectral_density_low:.3f} (proportion)")
     print(f"    Mid Density:          {features.spectral_density_mid:.3f} (proportion)")
     print(f"    High Density:         {features.spectral_density_high:.3f} (proportion)")

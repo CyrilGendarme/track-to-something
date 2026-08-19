@@ -93,15 +93,6 @@ class MediumAnalyzer:
         mid_energy = min(1.0, mid_energy / max_mag)
         high_energy = min(1.0, high_energy / max_mag)
         
-        # Spectral centroid
-        if np.sum(magnitude) > 0:
-            spectral_centroid_hz = np.sum(freqs * magnitude) / np.sum(magnitude)
-        else:
-            spectral_centroid_hz = 0.0
-        
-        # Normalize to 0-1 (20Hz to 20kHz range)
-        spectral_brightness = max(0.0, min(1.0, (spectral_centroid_hz - 20) / (20000 - 20)))
-        
         # Energy deltas for smooth animation
         overall_energy = max(bass_energy, mid_energy, high_energy)
         bass_energy_delta = bass_energy - self.prev_bass_energy
@@ -115,8 +106,6 @@ class MediumAnalyzer:
             bass_energy=bass_energy,
             mid_energy=mid_energy,
             high_energy=high_energy,
-            spectral_centroid_hz=spectral_centroid_hz,
-            spectral_brightness=spectral_brightness,
             bass_energy_delta=bass_energy_delta,
             overall_energy_delta=overall_energy_delta,
         )

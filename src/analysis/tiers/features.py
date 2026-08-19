@@ -44,10 +44,6 @@ class MediumFeatures:
     mid_energy: float             # 0-1 (250-4000 Hz)
     high_energy: float            # 0-1 (4000-20000 Hz)
     
-    # Spectral features
-    spectral_centroid_hz: float   # Center of energy
-    spectral_brightness: float    # 0-1 (normalized centroid)
-    
     # Energy rate of change (for smooth animation)
     bass_energy_delta: float      # Change in bass since last update
     overall_energy_delta: float   # Change in total energy
@@ -79,7 +75,6 @@ class SlowFeatures:
     # ════════════════════════════════════════════════════════════════════
     # SPECTRAL CHARACTERISTICS (average over window for color palette)
     # ════════════════════════════════════════════════════════════════════
-    spectral_centroid_hz: float   # Weighted average frequency
     spectral_density_low: float   # 0-1 (proportion of energy in bass)
     spectral_density_mid: float   # 0-1 (proportion of energy in mids)
     spectral_density_high: float  # 0-1 (proportion of energy in highs)

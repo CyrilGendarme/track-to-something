@@ -298,12 +298,6 @@ class SlowAnalyzer:
             spectral_density_mid = 0.33
             spectral_density_high = 0.34
         
-        # Spectral centroid (weighted average frequency)
-        if total_energy > 0:
-            spectral_centroid_hz = float(np.sum(freqs * magnitude) / total_energy)
-        else:
-            spectral_centroid_hz = 0.0
-        
         # Store spectral for tonality averaging
         self.spectral_history.append(magnitude)
         if len(self.spectral_history) > self.max_spectral_history:
@@ -387,7 +381,6 @@ class SlowAnalyzer:
             mid_energy=mid_energy,
             high_energy=high_energy,
             # Spectral characteristics
-            spectral_centroid_hz=spectral_centroid_hz,
             spectral_density_low=float(spectral_density_low),
             spectral_density_mid=float(spectral_density_mid),
             spectral_density_high=float(spectral_density_high),
