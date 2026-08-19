@@ -160,6 +160,7 @@ class AudioProcessingWorker(QueuedWorker):
         # Cache spectral data between chunks for stability
         self._prev_magnitude: np.ndarray | None = None
         self._prev_frame_energy: np.ndarray | None = None
+        self._flux_history: list[float] = []  # Track spectral flux for adaptive threshold
         
         # Use SHARED multi-window analyzer (passed from pipeline)
         # This ensures all parallel workers feed beats into the SAME tempo tracker
@@ -247,31 +248,62 @@ class AudioProcessingWorker(QueuedWorker):
                 beat_confidence = 0.0
                 onset_detected = False
                 
-                if magnitude.shape[1] > 1 and self._prev_magnitude is not None:
-                    # Spectral flux: changes in magnitude spectrum frame-to-frame
-                    # This is more reliable than simple amplitude thresholding
-                    mag_diff = magnitude - self._prev_magnitude
-                    flux = np.sqrt(np.sum(mag_diff ** 2, axis=0))
+                # Use spectral flux if we have a previous frame
+                # Note: STFT of single chunk returns 1 frame, so we compare frame-to-frame across chunks
+                if self._prev_magnitude is not None and self._prev_magnitude.shape[0] == magnitude.shape[0]:
+                    # Spectral flux: L2 norm of magnitude difference across frequency bins
+                    # This detects sudden changes in spectrum (characteristic of beats/onsets)
+                    mag_diff = magnitude[:, 0] - self._prev_magnitude[:, 0]  # Compare to prev chunk's spectrum
+                    spectral_flux = float(np.sqrt(np.sum(mag_diff ** 2)))
                     
-                    if len(flux) > 1:
-                        flux_mean = np.mean(flux)
-                        flux_std = np.std(flux)
+                    # Calculate threshold from recent spectral flux history
+                    flux_mean = np.mean(self._flux_history) if len(self._flux_history) > 0 else spectral_flux
+                    flux_std = np.std(self._flux_history) if len(self._flux_history) > 1 else 0.0
+                    onset_threshold = flux_mean + (flux_std * 2.5)
+                    
+                    # Track flux history for adaptive threshold
+                    self._flux_history.append(spectral_flux)
+                    if len(self._flux_history) > 100:
+                        self._flux_history.pop(0)
+                    
+                    logger.debug(
+                        f"[{self.name}] FLUX @ {item.timestamp_s:.3f}s: "
+                        f"flux={spectral_flux:.6f}, mean={flux_mean:.6f}, std={flux_std:.6f}, threshold={onset_threshold:.6f}"
+                    )
+                    
+                    onset_detected = spectral_flux > onset_threshold
+                    
+                    # Beat detection: strong spectral flux (onset) + energy above baseline
+                    # Peaks in flux with high energy = percussive beat
+                    if onset_detected and overall_amplitude > rms * 1.3:
+                        # Confidence: how much does flux exceed threshold?
+                        if flux_mean > 0:
+                            beat_confidence = min(1.0, (spectral_flux / onset_threshold) * 0.8)
+                        else:
+                            beat_confidence = 0.0
                         
-                        # Onset threshold: 2.5x std above mean
-                        onset_threshold = flux_mean + (flux_std * 2.5)
-                        onset_detected = bool(np.any(flux > onset_threshold))
-                        
-                        # Beat detection: strong spectral flux (onset) + energy above baseline
-                        # Peaks in flux with high energy = percussive beat
-                        if np.any(flux > onset_threshold) and overall_amplitude > rms * 1.3:
-                            max_flux = float(np.max(flux))
-                            beat_confidence = min(1.0, (max_flux / flux_mean - 1.0) / 5.0)
-                            beat_detected = beat_confidence > 0.3  # Only beats with >30% confidence
-                            logger.info(f"[{self.name}] BEAT DETECTED @ {item.timestamp_s:.3f}s: confidence={beat_confidence:.2f}, amp={overall_amplitude:.3f}, rms={rms:.3f}, flux_max={max_flux:.3f}")
+                        beat_detected = beat_confidence > 0.5  # Only beats with >50% confidence
+                        logger.info(
+                            f"[{self.name}] BEAT DETECTED @ {item.timestamp_s:.3f}s: "
+                            f"confidence={beat_confidence:.2f}, flux={spectral_flux:.6f}, amp={overall_amplitude:.3f}"
+                        )
                     else:
-                        onset_detected = False
+                        if not onset_detected:
+                            logger.debug(
+                                f"[{self.name}] NO ONSET @ {item.timestamp_s:.3f}s "
+                                f"(flux={spectral_flux:.6f} <= threshold={onset_threshold:.6f})"
+                            )
+                        else:
+                            logger.debug(
+                                f"[{self.name}] LOW AMP @ {item.timestamp_s:.3f}s "
+                                f"({overall_amplitude:.3f} <= {rms * 1.3:.3f})"
+                            )
                 else:
-                    # Fallback to amplitude-based beat detection if STFT unavailable
+                    # Fallback to amplitude-based beat detection if no previous magnitude
+                    logger.debug(
+                        f"[{self.name}] NO PREV MAGNITUDE @ {item.timestamp_s:.3f}s (building history)"
+                    )
+                    
                     mono_env = np.abs(mono)
                     env_rms = np.sqrt(np.mean(mono_env ** 2))
                     beat_threshold = env_rms * 1.5
@@ -351,7 +383,7 @@ class AudioProcessingWorker(QueuedWorker):
             
             # Create comprehensive features message
             features = AudioFeaturesMessage(
-                timestamp_s=self.timestamp,
+                timestamp_s=item.timestamp_s,
                 overall_amplitude=overall_amplitude,
                 rms=rms,
                 peak=peak,

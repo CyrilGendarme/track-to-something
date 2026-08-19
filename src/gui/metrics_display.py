@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import tkinter as tk
 from tkinter import ttk
 from dataclasses import dataclass
@@ -10,6 +11,8 @@ import threading
 
 from src.analysis.tiers.features import FastFeatures, MediumFeatures, SlowFeatures
 from src.gui.theme import BG, BG_PANEL, BG_CARD, FG, FG_DIM, ACCENT, ACCENT2, FONT_UI, FONT_BOLD
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -41,6 +44,9 @@ class RealTimeMetricsDisplay(ttk.Frame):
         self.slow_features: Optional[SlowFeatures] = None
         self.lock = threading.Lock()
         
+        # Track last BPM to avoid logging every update
+        self.last_bpm_value: Optional[float] = None
+        
         # Initialize widget references FIRST (before tab creation)
         self.value_labels: dict[str, ttk.Label] = {}
         self.progress_bars: dict[str, ttk.Progressbar] = {}
@@ -68,7 +74,7 @@ class RealTimeMetricsDisplay(ttk.Frame):
             "slow_density_high": MetricField("High Density", "spectral_density_high", "slow", "{:.3f}", ""),
             "slow_key": MetricField("Detected Key", "detected_key", "slow", "{}", ""),
             "slow_key_conf": MetricField("Key Confidence", "key_confidence", "slow", "{:.3f}", "", True, 1.0),
-            "slow_bpm": MetricField("Estimated BPM", "estimated_bpm", "slow", "{}", ""),
+            "slow_bpm": MetricField("Estimated BPM", "estimated_bpm", "slow", "{:.1f}", ""),
             "slow_beat_stability": MetricField("Beat Stability", "beat_stability", "slow", "{:.3f}", "", True, 1.0),
             "slow_energy_trend": MetricField("Energy Trend", "energy_trend", "slow", "{:+.3f}", ""),
             "slow_avg_energy": MetricField("Avg Energy", "average_energy", "slow", "{:.3f}", "", True, 1.0),
@@ -231,7 +237,17 @@ class RealTimeMetricsDisplay(ttk.Frame):
         try:
             value = getattr(features, metric_def.key)
         except AttributeError:
+            if metric_key == "slow_bpm":
+                logger.warning(f"[GUI] BPM: slow features missing attribute '{metric_def.key}'")
             return
+        
+        # Debug log for BPM (only on change)
+        if metric_key == "slow_bpm" and value is not None:
+            current_bpm = float(value) if value is not None else None
+            # Only log if BPM changed significantly (more than 1 BPM difference)
+            if self.last_bpm_value is None or abs(current_bpm - self.last_bpm_value) > 1.0:
+                logger.info(f"[GUI] BPM changed: {current_bpm:.1f} BPM")
+                self.last_bpm_value = current_bpm
         
         # Format value
         if value is None:
@@ -244,8 +260,10 @@ class RealTimeMetricsDisplay(ttk.Frame):
             else:
                 try:
                     display_text = metric_def.format_str.format(value)
-                except (ValueError, TypeError):
+                except (ValueError, TypeError) as e:
                     display_text = str(value)
+                    if metric_key == "slow_bpm":
+                        logger.error(f"[GUI] BPM format error: {e}")
         
         # Update label
         if metric_key in self.value_labels:

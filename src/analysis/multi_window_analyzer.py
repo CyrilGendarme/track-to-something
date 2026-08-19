@@ -182,7 +182,7 @@ class MultiWindowAudioAnalyzer:
         
         return fast_features, medium_features, slow_features
     
-    def record_beat_detection(self, timestamp_s: float, beat_confidence: float = 1.0) -> None:
+    def record_beat_detection(self, timestamp_s: float, beat_confidence: float = 1.0) -> bool:
         """Record beat for tempo tracking.
         
         THREAD-SAFE: Can be called by multiple processing workers simultaneously
@@ -190,8 +190,17 @@ class MultiWindowAudioAnalyzer:
         Args:
             timestamp_s: Timestamp of beat detection
             beat_confidence: Confidence in beat detection (0-1)
+            
+        Returns:
+            True if beat was accepted, False if rejected (e.g., too close to previous beat)
         """
         with self.lock:  # Thread-safe: multiple workers may call this
             self.last_beat_confidence = beat_confidence
-            self.slow_analyzer.record_beat(timestamp_s)
-            logger.info(f"[MultiWindowAnalyzer] Beat recorded @ {timestamp_s:.3f}s (confidence={beat_confidence:.2f})")
+            beat_accepted = self.slow_analyzer.record_beat(timestamp_s)
+            
+            if beat_accepted:
+                logger.info(f"[MultiWindowAnalyzer] Beat recorded @ {timestamp_s:.3f}s (confidence={beat_confidence:.2f})")
+            else:
+                logger.debug(f"[MultiWindowAnalyzer] Beat rejected @ {timestamp_s:.3f}s (too close to previous)")
+            
+            return beat_accepted

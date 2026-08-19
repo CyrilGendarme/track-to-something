@@ -90,17 +90,40 @@ class SlowAnalyzer:
         
         logger.info(f"[SlowAnalyzer] {window_size_ms:.1f}ms windows ({self.window_size_samples} samples)")
     
-    def record_beat(self, timestamp_s: float) -> None:
+    def record_beat(self, timestamp_s: float) -> bool:
         """Record a beat detection for tempo estimation.
+        
+        Rejects beats that are too close together (violate min BPM limit).
+        Supports BPM range: 60-220 BPM
         
         Args:
             timestamp_s: Timestamp of beat
+            
+        Returns:
+            True if beat was accepted and stored, False if rejected
         """
+        # Reject beats too close together (< minimum interval for 220 BPM)
+        # This filters out spurious double-detections from the same transient
+        MIN_BEAT_INTERVAL = 60.0 / 220.0  # 220 BPM max ≈ 0.273s
+        
+        if len(self.beat_timestamps) > 0:
+            last_beat_time = self.beat_timestamps[-1]
+            interval_since_last = timestamp_s - last_beat_time
+            
+            if interval_since_last < MIN_BEAT_INTERVAL:
+                logger.debug(
+                    f"[SlowAnalyzer] Beat REJECTED: too soon after last beat "
+                    f"({interval_since_last:.3f}s < {MIN_BEAT_INTERVAL:.3f}s, min 220 BPM)"
+                )
+                return False
+        
+        # Beat is valid, store it
         self.beat_timestamps.append(timestamp_s)
         if len(self.beat_timestamps) > self.max_beat_history:
             self.beat_timestamps.pop(0)
         
         logger.info(f"[SlowAnalyzer] Beat stored @ {timestamp_s:.3f}s. Total beats in history: {len(self.beat_timestamps)}/{self.max_beat_history}")
+        return True
     
     def _compute_chromagram(self, audio_mono: np.ndarray) -> np.ndarray:
         """Compute chromagram (energy in each pitch class).
@@ -398,10 +421,10 @@ class SlowAnalyzer:
         
         # Average beat confidence
         beat_confidence = float(np.mean(self.beat_confidence_history)) if len(self.beat_confidence_history) > 0 else 0.0
-        beat_detected = beat_confidence > 0.3
+        beat_detected = beat_confidence > 0.5  # Require >50% confidence (was 0.3, filtering noise)
         
         # ════════════════════════════════════════════════════════════════════
-        # TEMPO ESTIMATION
+        # TEMPO ESTIMATION (with beat interval validation)
         # ════════════════════════════════════════════════════════════════════
         estimated_bpm = None
         beat_stability = 0.0
@@ -410,20 +433,47 @@ class SlowAnalyzer:
         
         if len(self.beat_timestamps) >= 3:
             intervals = np.diff(self.beat_timestamps)
-            avg_interval = np.mean(intervals)
-            interval_std = np.std(intervals)
             
-            # Convert to BPM
-            if avg_interval > 0:
-                beats_per_second = 1.0 / avg_interval
-                estimated_bpm = beats_per_second * 60.0
+            # VALIDATION: Filter by realistic BPM range (60-220 BPM for electronic music)
+            # BPM = 60 / interval_seconds, so:
+            # 220 BPM = 0.273s per beat (max fast tempo)
+            # 60 BPM = 1.0s per beat (min slow tempo)
+            MIN_INTERVAL = 60.0 / 220.0  # 220 BPM max ≈ 0.273s
+            MAX_INTERVAL = 60.0 / 60.0   # 60 BPM min = 1.0s
+            
+            valid_intervals = intervals[
+                (intervals >= MIN_INTERVAL) & (intervals <= MAX_INTERVAL)
+            ]
+            
+            if len(valid_intervals) >= 2:
+                # Use valid intervals for BPM calculation
+                avg_interval = np.mean(valid_intervals)
+                interval_std = np.std(valid_intervals)
                 
-                # Stability: how consistent are the intervals?
-                beat_stability = max(0.0, min(1.0, 1.0 - (interval_std / avg_interval / 0.2)))
-                
-                logger.info(f"[SlowAnalyzer] BPM CALCULATED: {estimated_bpm:.1f} BPM (stability={beat_stability:.2f}, intervals={list(np.round(intervals, 3))})")
+                # Convert to BPM
+                if avg_interval > 0:
+                    beats_per_second = 1.0 / avg_interval
+                    estimated_bpm = beats_per_second * 60.0
+                    
+                    # Stability: how consistent are the intervals?
+                    # High stability = low coefficient of variation
+                    cv = interval_std / avg_interval if avg_interval > 0 else 0
+                    beat_stability = max(0.0, min(1.0, 1.0 - (cv / 0.2)))
+                    
+                    logger.info(
+                        f"[SlowAnalyzer] BPM CALCULATED: {estimated_bpm:.1f} BPM "
+                        f"(stability={beat_stability:.2f}, valid_intervals={len(valid_intervals)}/{len(intervals)}, "
+                        f"avg={avg_interval:.3f}s)"
+                    )
+                else:
+                    logger.warning(f"[SlowAnalyzer] BPM calc failed: avg_interval={avg_interval} <= 0")
             else:
-                logger.warning(f"[SlowAnalyzer] BPM calc failed: avg_interval={avg_interval} <= 0")
+                # Not enough valid intervals
+                logger.debug(
+                    f"[SlowAnalyzer] Too many invalid intervals: {len(intervals) - len(valid_intervals)}/{len(intervals)} "
+                    f"outside range [{MIN_INTERVAL}, {MAX_INTERVAL}]. "
+                    f"Intervals: {list(np.round(intervals, 3))}"
+                )
         else:
             logger.debug(f"[SlowAnalyzer] Not enough beats for BPM: {len(self.beat_timestamps)}/3 (need 3+)")
         
