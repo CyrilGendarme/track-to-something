@@ -15,12 +15,17 @@ from typing import Final
 
 # Default sample rate for audio capture and processing (Hz)
 # Common values: 44100 (CD quality), 48000 (video/professional)
-DEFAULT_SAMPLE_RATE: Final[int] = int(os.getenv("MOSHPRO_SAMPLE_RATE", "44100"))
+# Bass-heavy / Electronic Music (recommended for you?) -> 22050
+# 2️Balanced (vocals, acoustic) -> 32000
+#  Full fidelity (classical, orchestral) -> 44100
+DEFAULT_SAMPLE_RATE: Final[int] = int(os.getenv("MOSHPRO_SAMPLE_RATE", "22050"))
 
 # Audio chunk size for capture workers (samples per chunk)
 # Affects latency (smaller = lower latency, higher CPU)
 # ~2048 samples @ 44.1kHz = ~46ms capture latency
-AUDIO_CHUNK_SIZE: Final[int] = int(os.getenv("MOSHPRO_CHUNK_SIZE", "2048"))
+# A lower DEFAULT_SAMPLE_RATE allows for smaller chunk sizes without increasing CPU load.
+# ~256 samples @ 22.05kHz = ~11.6ms capture latency
+AUDIO_CHUNK_SIZE: Final[int] = int(os.getenv("MOSHPRO_CHUNK_SIZE", "256"))
 
 # ────────────────────────────────────────────────────────────────────────────
 # CIRCULAR BUFFER (shared between analyzer tiers)
@@ -66,7 +71,7 @@ BEAT_HISTORY_SIZE: Final[int] = int(os.getenv("MOSHPRO_BEAT_HISTORY_SIZE", "10")
 
 # Spectral analysis (STFT, centroid, frequency bands) every N chunks
 # Default: 2 = run every 2 chunks (~90ms latency)
-SPECTRAL_ANALYSIS_DECIMATION: Final[int] = int(os.getenv("MOSHPRO_SPECTRAL_DECIMATION", "2"))
+SPECTRAL_ANALYSIS_DECIMATION: Final[int] = int(os.getenv("MOSHPRO_SPECTRAL_DECIMATION", "4"))
 
 # Tempo estimation every N chunks (avoid constantly recalculating BPM)
 # Default: 8 = run every 8 chunks (~370ms latency, stable estimation)
@@ -79,7 +84,7 @@ TEMPO_ANALYSIS_DECIMATION: Final[int] = int(os.getenv("MOSHPRO_TEMPO_DECIMATION"
 # STFT FFT size (number of points)
 # Larger = better frequency resolution, worse time resolution
 # 2048 @ 44.1kHz = 46.4ms, ~21.5Hz per bin (good balance)
-STFT_FFT_SIZE: Final[int] = int(os.getenv("MOSHPRO_STFT_FFT_SIZE", "2048"))
+STFT_FFT_SIZE: Final[int] = int(os.getenv("MOSHPRO_STFT_FFT_SIZE", "1024"))
 
 # STFT hop length (samples between frames)
 # hop_length = fft_size / 4 gives 75% overlap, 25% new data per frame
@@ -115,24 +120,14 @@ FREQ_BAND_HIGH_MAX: Final[float] = 20000.0
 # Reduced from 4 to 2 to minimize GIL lock contention in Python threading
 # Each worker handles FAST/MEDIUM/SLOW tiers with 2-8x decimation
 NUM_PROCESSING_WORKERS: Final[int] = int(
-    os.getenv("MOSHPRO_PROCESSING_WORKERS", "2")
+    os.getenv("MOSHPRO_PROCESSING_WORKERS", "3")
 )
 
 # Output queue maximum size
 # Larger = more buffering, higher latency tolerance
 OUTPUT_QUEUE_MAXSIZE: Final[int] = int(os.getenv("MOSHPRO_QUEUE_MAXSIZE", "10"))
 
-# ────────────────────────────────────────────────────────────────────────────
-# AUDIO INPUT DEFAULTS
-# ────────────────────────────────────────────────────────────────────────────
 
-# Default sample rate for USB audio input
-USB_DEFAULT_SAMPLE_RATE: Final[int] = int(os.getenv("MOSHPRO_USB_SAMPLE_RATE", "48000"))
-
-# Default sample rate for loopback/stereo mix
-LOOPBACK_DEFAULT_SAMPLE_RATE: Final[int] = int(
-    os.getenv("MOSHPRO_LOOPBACK_SAMPLE_RATE", "44100")
-)
 
 # ────────────────────────────────────────────────────────────────────────────
 # ONSET & BEAT DETECTION THRESHOLDS
@@ -140,7 +135,7 @@ LOOPBACK_DEFAULT_SAMPLE_RATE: Final[int] = int(
 
 # Energy rise threshold for onset detection (0-1 normalized)
 # How much energy rise counts as an "onset"
-ONSET_THRESHOLD: Final[float] = float(os.getenv("MOSHPRO_ONSET_THRESHOLD", "0.3"))
+ONSET_THRESHOLD: Final[float] = float(os.getenv("MOSHPRO_ONSET_THRESHOLD", "0.5"))
 
 # Beat confidence threshold (0-1)
 # How confident we need to be before reporting a beat
@@ -150,7 +145,7 @@ BEAT_CONFIDENCE_THRESHOLD: Final[float] = float(
 
 # Silence threshold (0-1 normalized energy)
 # Energy below this is considered silence
-SILENCE_THRESHOLD: Final[float] = float(os.getenv("MOSHPRO_SILENCE_THRESHOLD", "0.05"))
+SILENCE_THRESHOLD: Final[float] = float(os.getenv("MOSHPRO_SILENCE_THRESHOLD", "0.1"))
 
 # ────────────────────────────────────────────────────────────────────────────
 # LOGGING & DEBUG
