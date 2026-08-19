@@ -57,6 +57,22 @@ SLOW_WINDOW_MS: Final[float] = float(os.getenv("MOSHPRO_SLOW_WINDOW_MS", "250.0"
 BEAT_HISTORY_SIZE: Final[int] = int(os.getenv("MOSHPRO_BEAT_HISTORY_SIZE", "10"))
 
 # ────────────────────────────────────────────────────────────────────────────
+# ANALYSIS TIER DECIMATION FACTORS
+# ────────────────────────────────────────────────────────────────────────────
+# Only do expensive analyses every N chunks to reduce CPU load
+# FAST (every chunk): amplitude, beat, onset → ~5-10ms
+# MEDIUM (every 2-3 chunks): spectral analysis, bands → ~20-50ms
+# SLOW (every 8+ chunks): tempo estimation → ~300-700ms
+
+# Spectral analysis (STFT, centroid, frequency bands) every N chunks
+# Default: 2 = run every 2 chunks (~90ms latency)
+SPECTRAL_ANALYSIS_DECIMATION: Final[int] = int(os.getenv("MOSHPRO_SPECTRAL_DECIMATION", "2"))
+
+# Tempo estimation every N chunks (avoid constantly recalculating BPM)
+# Default: 8 = run every 8 chunks (~370ms latency, stable estimation)
+TEMPO_ANALYSIS_DECIMATION: Final[int] = int(os.getenv("MOSHPRO_TEMPO_DECIMATION", "8"))
+
+# ────────────────────────────────────────────────────────────────────────────
 # SPECTRAL ANALYSIS (STFT)
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -94,10 +110,12 @@ FREQ_BAND_HIGH_MAX: Final[float] = 20000.0
 # ────────────────────────────────────────────────────────────────────────────
 
 # Number of parallel audio processing workers
-# More workers = higher CPU but better parallelization
-# Typical: 2-4 for low-power, 4-8 for high-power
+# More workers = higher CPU but worse GIL contention with tiered analysis
+# With TIERED ANALYSIS decimation, 1-2 workers handles most load efficiently
+# Reduced from 4 to 2 to minimize GIL lock contention in Python threading
+# Each worker handles FAST/MEDIUM/SLOW tiers with 2-8x decimation
 NUM_PROCESSING_WORKERS: Final[int] = int(
-    os.getenv("MOSHPRO_PROCESSING_WORKERS", "4")
+    os.getenv("MOSHPRO_PROCESSING_WORKERS", "2")
 )
 
 # Output queue maximum size
