@@ -1,0 +1,16 @@
+numpy
+librosa
+mido
+python-rtmidi
+python-osc
+sounddevice
+soundcard
+soundfile
+pytest
+psutil
+rich>=13.0.0
+pyrekordbox>=0.4.4   # SQLCipher access to Rekordbox 6 master.db
+sqlcipher3           # DBAPI2 driver pulled in by pyrekordbox; imported directly
+mido
+python-rtmidi
+rapidfuzz
