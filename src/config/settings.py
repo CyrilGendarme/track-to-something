@@ -25,7 +25,7 @@ DEFAULT_SAMPLE_RATE: Final[int] = int(os.getenv("MOSHPRO_SAMPLE_RATE", "44100"))
 # Affects latency (smaller = lower latency, higher CPU)
 # ~2048 samples @ 44.1kHz = ~46ms capture latency
 # Increased sample rate to 44100 Hz, chunk size adjusted for ~23ms latency
-AUDIO_CHUNK_SIZE: Final[int] = int(os.getenv("MOSHPRO_CHUNK_SIZE", "1024"))
+AUDIO_CHUNK_SIZE: Final[int] = int(os.getenv("MOSHPRO_CHUNK_SIZE", "64"))
 
 # ────────────────────────────────────────────────────────────────────────────
 # AUDIO QUALITY REDUCTION (for lightweight analysis)
