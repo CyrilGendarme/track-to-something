@@ -6,7 +6,7 @@ import logging
 
 import numpy as np
 
-from src.config import DEFAULT_SAMPLE_RATE, FAST_WINDOW_MS
+from src.config import DEFAULT_SAMPLE_RATE, FAST_WINDOW_MS, SILENCE_THRESHOLD
 from .features import FastFeatures
 
 logger = logging.getLogger(__name__)
@@ -58,9 +58,12 @@ class FastAnalyzer:
         onset_detected = energy_delta > self.energy_threshold
         onset_strength = min(1.0, max(0.0, energy_delta / self.energy_threshold))
         
-        # PERCUSSIVE PEAK DETECTION: high energy in short burst
-        # Peaks over 0.7 with rapid attack = kick/snare-like
-        is_percussive_peak = raw_energy > 0.7 and onset_strength > 0.5
+        # PERCUSSIVE PEAK DETECTION: rapid attack above the silence floor.
+        # raw_energy is RMS over a ~10ms window, which rarely exceeds ~0.3-0.4
+        # even for very loud transients (a peak sample near 1.0 only lasts a
+        # few samples) - gating on raw_energy > 0.7 as before meant this
+        # essentially never fired.
+        is_percussive_peak = raw_energy > SILENCE_THRESHOLD and onset_strength > 0.5
         percussive_peak_strength = raw_energy if is_percussive_peak else 0.0
         
         self.prev_energy = raw_energy

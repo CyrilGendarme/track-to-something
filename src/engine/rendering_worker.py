@@ -56,11 +56,17 @@ class RenderingWorker(QueuedWorker):
                     pred_delta = item.predicted_beat_timestamp_s - item.timestamp_s
                     pred_str = f" | PRED: {pred_delta:+.2f}s (conf={item.prediction_confidence:.2f})"
                 
-                print(
+                line = (
                     f"[{self.name}] {beat_str} {onset_str} [{phase_bar}] | "
                     f"bass={item.bass:.2f} energy={item.energy:.2f} brightness={item.brightness:.2f} impact={item.impact:.2f}"
                     f"{pred_str}"
                 )
+                try:
+                    print(line)
+                except UnicodeEncodeError:
+                    # Some Windows consoles (cp1252) can't render the unicode
+                    # note/block characters above - fall back to ASCII-safe output.
+                    print(line.encode("ascii", errors="replace").decode("ascii"))
                 self.last_log_time = item.timestamp_s
         
         # PREDICTIVE SYNC - Use beat phase for anticipatory rendering

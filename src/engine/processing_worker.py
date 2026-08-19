@@ -14,6 +14,7 @@ from src.config import (
     STFT_FFT_SIZE,
     STFT_HOP_LENGTH,
 )
+from src.analysis.bpm_detectors import consensus_bpm
 from src.engine.base import QueuedWorker
 from src.engine.messages import AudioChunkMessage, AudioFeaturesMessage
 from src.engine.performance import get_performance_monitor
@@ -413,15 +414,18 @@ class AudioProcessingWorker(QueuedWorker):
                             stereo_chunk = np.column_stack([item.samples, item.samples])
                             self.multi_analyzer.add_audio_chunk(stereo_chunk.astype(np.float32))
                         
-                        # Record beat detection for tempo tracking
-                        # This feeds beat_detected events into slow_analyzer.beat_timestamps
-                        # which is used for BPM estimation
+                        # Record beat confidence for beat_confidence/beat_detected aggregation
                         if beat_detected:
                             self.multi_analyzer.record_beat_detection(item.timestamp_s, beat_confidence)
                         
                         # Analyze all tiers periodically (every few chunks)
                         if self._chunk_counter % 4 == 0:  # Every ~4 chunks (~46ms)
                             fast_f, medium_f, slow_f = self.multi_analyzer.analyze_all(item.timestamp_s)
+                            # Estimated BPM comes from the multi-method BPM consensus
+                            # (BPMAnalysisWorker), not from SlowAnalyzer itself
+                            if self.feature_cache is not None:
+                                bpm_estimates = self.feature_cache.get_bpm_estimates()
+                                slow_f.estimated_bpm, slow_f.beat_stability = consensus_bpm(bpm_estimates)
                             self.feature_cache.update(fast=fast_f, medium=medium_f, slow=slow_f)
                     except Exception as e:
                         logger.debug(f"[{self.name}] Error in tiered analysis: {e}")

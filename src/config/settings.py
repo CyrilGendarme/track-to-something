@@ -83,14 +83,9 @@ SLOW_WINDOW_MS: Final[float] = float(os.getenv("MOSHPRO_SLOW_WINDOW_MS", "150.0"
 # CRITICAL: Must be MUCH LONGER than other windows to capture multiple beats
 # At 120 BPM: beats every ~500ms → need 2+ seconds for 4+ beats
 # At 100 BPM: beats every ~600ms → need 2.4+ seconds for 4+ beats
-# 2000ms (2 seconds) = ~4 beats at 120 BPM = good BPM resolution
+# 5000ms (5 seconds) = ~10 beats at 120 BPM = excellent BPM stability
 # Separate from SLOW_WINDOW_MS because beat patterns span multiple STFT windows
-BEAT_ANALYSIS_WINDOW_MS: Final[float] = float(os.getenv("MOSHPRO_BEAT_ANALYSIS_WINDOW_MS", "2000.0"))
-
-# Max beat history for tempo/BPM estimation
-# More history = more stable tempo but slower adaptation
-# Increased to 10: CPU is good, need stable tempo for accurate tonality detection
-BEAT_HISTORY_SIZE: Final[int] = int(os.getenv("MOSHPRO_BEAT_HISTORY_SIZE", "10"))
+BEAT_ANALYSIS_WINDOW_MS: Final[float] = float(os.getenv("MOSHPRO_BEAT_ANALYSIS_WINDOW_MS", "5000.0"))
 
 # Tonality detection history size (number of detected keys to smooth)
 # Higher = more stable but slower to adapt to key changes
@@ -213,6 +208,21 @@ DEBUG_WORKERS: Final[bool] = os.getenv("MOSHPRO_DEBUG_WORKERS", "").lower() == "
 
 # Enable debug logging for analysis
 DEBUG_ANALYSIS: Final[bool] = os.getenv("MOSHPRO_DEBUG_ANALYSIS", "").lower() == "true"
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# LOCAL ANALYSIS API (HTTP + WebSocket for other local apps to consume data)
+# ────────────────────────────────────────────────────────────────────────────
+
+# Bind address for the local API server. Defaults to loopback-only so the
+# analysis data isn't exposed to the network unless explicitly reconfigured.
+API_HOST: Final[str] = os.getenv("MOSHPRO_API_HOST", "127.0.0.1")
+
+# Port for the local API server (HTTP GET endpoints + /ws WebSocket stream)
+API_PORT: Final[int] = int(os.getenv("MOSHPRO_API_PORT", "8765"))
+
+# How often the WebSocket endpoint broadcasts the latest snapshot (seconds)
+API_BROADCAST_INTERVAL_S: Final[float] = float(os.getenv("MOSHPRO_API_BROADCAST_INTERVAL_S", "0.1"))
 
 
 # ────────────────────────────────────────────────────────────────────────────

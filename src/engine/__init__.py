@@ -1,6 +1,6 @@
 """Real-time audio analysis engine with multi-threaded pipeline."""
 
-from .pipeline import AudioPipeline
+from .pipeline import AudioPipeline, FeatureCache
 from .base import Worker, QueuedWorker
 from .messages import AudioChunkMessage, AudioFeaturesMessage, RenderingMessage
 from .buffer import CircularAudioBuffer
@@ -8,6 +8,7 @@ from .capture_worker import AudioCaptureWorker
 from .processing_worker import AudioProcessingWorker, BeatPredictor
 from .analysis_worker import AnalysisWorker
 from .rendering_worker import RenderingWorker
+from .bpm_worker import BPMAnalysisWorker
 from .performance import PerformanceMonitor, get_performance_monitor, timer
 from src.analysis import (
     FastAnalyzer,
@@ -32,10 +33,12 @@ from .events import (
 
 __all__ = [
     "AudioPipeline",
+    "FeatureCache",
     "AudioCaptureWorker",
     "AudioProcessingWorker",
     "AnalysisWorker",
     "RenderingWorker",
+    "BPMAnalysisWorker",
     "BeatPredictor",
     "CircularAudioBuffer",
     "AudioChunkMessage",

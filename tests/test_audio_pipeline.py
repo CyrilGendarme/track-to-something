@@ -95,8 +95,10 @@ def test_pipeline_with_multiple_workers() -> None:
         pytest.skip("USB_SIMULATION_FILE not configured")
     
     # Create pipeline with 4 workers
+    # Use a longer clip than the 1s liveness check below so the finite file
+    # source doesn't finish reading before we assert workers are still running
     pipeline = AudioPipeline(
-        audio_source=lambda: file_chunks(audio_file, settings.BLOCK_SIZE, max_duration_s=5),
+        audio_source=lambda: file_chunks(audio_file, settings.BLOCK_SIZE, max_duration_s=30),
         n_processing_workers=4,
     )
     

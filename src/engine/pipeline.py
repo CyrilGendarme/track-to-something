@@ -13,6 +13,7 @@ from src.config import (
     NUM_PROCESSING_WORKERS,
     OUTPUT_QUEUE_MAXSIZE,
 )
+from src.analysis.bpm_detectors import BPMEstimate
 from src.analysis.tiers.features import FastFeatures, MediumFeatures, SlowFeatures
 from src.analysis.multi_window_analyzer import MultiWindowAudioAnalyzer
 from .buffer import CircularAudioBuffer
@@ -20,6 +21,7 @@ from .capture_worker import AudioCaptureWorker
 from .processing_worker import AudioProcessingWorker
 from .analysis_worker import AnalysisWorker
 from .rendering_worker import RenderingWorker
+from .bpm_worker import BPMAnalysisWorker
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +34,7 @@ class FeatureCache:
         self.fast: Optional[FastFeatures] = None
         self.medium: Optional[MediumFeatures] = None
         self.slow: Optional[SlowFeatures] = None
+        self.bpm_estimates: dict[str, BPMEstimate] = {}
         self.lock = threading.Lock()
     
     def update(self, fast: Optional[FastFeatures] = None, medium: Optional[MediumFeatures] = None, slow: Optional[SlowFeatures] = None) -> None:
@@ -58,6 +61,16 @@ class FeatureCache:
         """
         with self.lock:
             return self.fast, self.medium, self.slow
+    
+    def update_bpm_estimates(self, estimates: dict[str, BPMEstimate]) -> None:
+        """Update the latest per-method BPM estimates."""
+        with self.lock:
+            self.bpm_estimates = estimates
+    
+    def get_bpm_estimates(self) -> dict[str, BPMEstimate]:
+        """Get the latest per-method BPM estimates."""
+        with self.lock:
+            return dict(self.bpm_estimates)
 
 
 class AudioPipeline:
@@ -77,6 +90,7 @@ class AudioPipeline:
         buffer_capacity_s: float = BUFFER_CAPACITY_SECONDS,
         sample_rate: int = DEFAULT_SAMPLE_RATE,
         event_callback: Callable[[str, dict], None] | None = None,
+        feature_cache: "FeatureCache | None" = None,
     ):
         """Initialize audio pipeline.
         
@@ -86,6 +100,10 @@ class AudioPipeline:
             buffer_capacity_s: Circular buffer capacity in seconds (default from config)
             sample_rate: Audio sample rate in Hz (default from config)
             event_callback: Callback for detected events (event_type, data)
+            feature_cache: Optional externally-owned FeatureCache (e.g. so a
+                local API server can keep serving the latest data across
+                repeated pipeline start/stop cycles). A new one is created
+                if omitted.
         """
         self.audio_source = audio_source
         self.buffer_capacity_s = buffer_capacity_s
@@ -100,7 +118,7 @@ class AudioPipeline:
         self.audio_buffer = CircularAudioBuffer(capacity_s=buffer_capacity_s, sample_rate=sample_rate)
         
         # Feature cache for GUI access (thread-safe)
-        self.feature_cache = FeatureCache()
+        self.feature_cache = feature_cache if feature_cache is not None else FeatureCache()
         
         # Shared multi-window analyzer (CRITICAL: one instance for all workers!)
         # This ensures all parallel workers feed beats into the SAME tempo tracker
@@ -143,6 +161,15 @@ class AudioPipeline:
             daemon=True,
         )
         
+        # Slow, parallel multi-method BPM analysis (separate cadence from the
+        # per-chunk onset-based estimate; pulls its own long audio window)
+        self.bpm_worker = BPMAnalysisWorker(
+            multi_analyzer=self.multi_analyzer,
+            on_result=self.feature_cache.update_bpm_estimates,
+            sample_rate=sample_rate,
+            daemon=True,
+        )
+        
         self._running = False
 
     def start(self) -> None:
@@ -159,6 +186,7 @@ class AudioPipeline:
             worker.start()
         self.analysis_worker.start()
         self.rendering_worker.start()
+        self.bpm_worker.start()
 
     def stop(self) -> None:
         """Stop all worker threads gracefully."""
@@ -175,6 +203,7 @@ class AudioPipeline:
             worker.stop()
         self.analysis_worker.stop()
         self.rendering_worker.stop()
+        self.bpm_worker.stop()
 
     def wait(self, timeout: float | None = None) -> None:
         """Wait for all workers to complete.
@@ -187,6 +216,7 @@ class AudioPipeline:
             worker.join(timeout=timeout)
         self.analysis_worker.join(timeout=timeout)
         self.rendering_worker.join(timeout=timeout)
+        self.bpm_worker.join(timeout=timeout)
 
     def is_running(self) -> bool:
         """Check if pipeline is running."""

@@ -10,6 +10,7 @@ from .multi_window_analyzer import (
     MediumFeatures,
     SlowFeatures,
 )
+from .bpm_detectors import BPMEstimate, MultiMethodBPMAnalyzer, consensus_bpm
 
 __all__ = [
     "AudioAnalysis",
@@ -22,4 +23,7 @@ __all__ = [
     "FastFeatures",
     "MediumFeatures",
     "SlowFeatures",
+    "BPMEstimate",
+    "MultiMethodBPMAnalyzer",
+    "consensus_bpm",
 ]

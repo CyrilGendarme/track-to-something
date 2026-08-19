@@ -10,9 +10,22 @@ from typing import Optional
 import threading
 
 from src.analysis.tiers.features import FastFeatures, MediumFeatures, SlowFeatures
+from src.analysis.bpm_detectors import BPMEstimate, consensus_bpm
 from src.gui.theme import BG, BG_PANEL, BG_CARD, FG, FG_DIM, ACCENT, ACCENT2, FONT_UI, FONT_BOLD
 
 logger = logging.getLogger(__name__)
+
+# Human-friendly labels for each BPM detector method (see src/analysis/bpm_detectors.py)
+BPM_METHOD_LABELS: dict[str, str] = {
+    "kick_band_autocorr": "Kick Band (40-120Hz) Autocorr",
+    "dynamic_kick_band": "Dynamic Kick Band Autocorr",
+    "comb_filter_bank": "Comb Filter Bank",
+    "librosa_beat_track": "Librosa Beat Track",
+    "librosa_onset_tempogram": "Librosa Onset Tempogram",
+    "aubio_tempo": "Aubio Tempo",
+    "madmom_dbn": "Madmom DBN Beat Tracker",
+    "essentia_rhythm_extractor": "Essentia Rhythm Extractor",
+}
 
 
 @dataclass
@@ -42,6 +55,7 @@ class RealTimeMetricsDisplay(ttk.Frame):
         self.fast_features: Optional[FastFeatures] = None
         self.medium_features: Optional[MediumFeatures] = None
         self.slow_features: Optional[SlowFeatures] = None
+        self.bpm_estimates: dict[str, BPMEstimate] = {}
         self.lock = threading.Lock()
         
         # Track last BPM to avoid logging every update
@@ -51,6 +65,12 @@ class RealTimeMetricsDisplay(ttk.Frame):
         self.value_labels: dict[str, ttk.Label] = {}
         self.progress_bars: dict[str, ttk.Progressbar] = {}
         self.bool_indicators: dict[str, tk.Canvas] = {}
+        
+        # Per-method BPM rows, created lazily as methods are first reported
+        self.bpm_rows_frame: Optional[ttk.Frame] = None
+        self.bpm_value_labels: dict[str, ttk.Label] = {}
+        self.bpm_conf_bars: dict[str, ttk.Progressbar] = {}
+        self.bpm_consensus_label: Optional[ttk.Label] = None
         
         # Define all metrics to display
         self.metrics = {
@@ -91,6 +111,115 @@ class RealTimeMetricsDisplay(ttk.Frame):
             tab = self._create_tier_tab(tier)
             self.tabs[tier] = tab
             self.notebook.add(tab, text=tier.upper())
+        
+        # Dedicated tab showing every BPM detection method side by side
+        bpm_tab = self._create_bpm_tab()
+        self.tabs["bpm"] = bpm_tab
+        self.notebook.add(bpm_tab, text="BPM METHODS")
+    
+    def _create_bpm_tab(self) -> ttk.Frame:
+        """Create the tab listing each BPM detection method's estimate.
+        
+        Rows are created lazily per-method the first time a result for that
+        method is received (see ``update_bpm_estimates``), since which
+        optional detectors (aubio/madmom/essentia) are available isn't known
+        until the first analysis pass completes.
+        """
+        tab_frame = ttk.Frame(self.notebook)
+        tab_frame.pack(fill=tk.BOTH, expand=True)
+        
+        canvas = tk.Canvas(tab_frame, bg=BG_PANEL, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(tab_frame, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+        
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        # Consensus row (confidence-weighted average of all methods) up top
+        consensus_row = ttk.Frame(scrollable_frame)
+        consensus_row.pack(fill=tk.X, padx=10, pady=(5, 10))
+        ttk.Label(consensus_row, text="Consensus BPM:", width=28, font=FONT_BOLD).pack(side=tk.LEFT, padx=(0, 10))
+        self.bpm_consensus_label = ttk.Label(
+            consensus_row, text="—", width=20, font=("Courier", 11, "bold"), foreground=ACCENT2
+        )
+        self.bpm_consensus_label.pack(side=tk.LEFT)
+        
+        self.bpm_rows_frame = scrollable_frame
+        
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        return tab_frame
+    
+    def _ensure_bpm_row(self, method: str) -> None:
+        """Create the display row for ``method`` the first time it's seen."""
+        if method in self.bpm_value_labels or self.bpm_rows_frame is None:
+            return
+        
+        row_frame = ttk.Frame(self.bpm_rows_frame)
+        row_frame.pack(fill=tk.X, padx=10, pady=4)
+        
+        label_text = BPM_METHOD_LABELS.get(method, method.replace("_", " ").title())
+        ttk.Label(row_frame, text=label_text + ":", width=28, font=FONT_UI).pack(side=tk.LEFT, padx=(0, 10))
+        
+        value_container = ttk.Frame(row_frame)
+        value_container.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        confidence_bar = ttk.Progressbar(value_container, length=100, maximum=100, mode="determinate")
+        confidence_bar.pack(side=tk.LEFT, padx=(0, 10))
+        self.bpm_conf_bars[method] = confidence_bar
+        
+        value_label = ttk.Label(value_container, text="—", width=22, font=("Courier", 10), foreground=ACCENT)
+        value_label.pack(side=tk.LEFT)
+        self.bpm_value_labels[method] = value_label
+    
+    def update_bpm_estimates(self, estimates: dict[str, BPMEstimate]) -> None:
+        """Update displayed values with the latest per-method BPM estimates.
+        
+        Args:
+            estimates: {method_name: BPMEstimate}, as produced by
+                ``MultiMethodBPMAnalyzer.analyze``.
+        """
+        with self.lock:
+            self.bpm_estimates = estimates
+        self.after(0, self._update_bpm_display)
+    
+    def _update_bpm_display(self) -> None:
+        """Update the BPM methods tab (called on main thread)."""
+        with self.lock:
+            estimates = dict(self.bpm_estimates)
+        
+        if not estimates:
+            return
+        
+        for method, estimate in estimates.items():
+            self._ensure_bpm_row(method)
+            value_label = self.bpm_value_labels.get(method)
+            conf_bar = self.bpm_conf_bars.get(method)
+            
+            if not estimate.available:
+                text = "N/A (not installed)"
+            elif estimate.bpm is None:
+                text = f"— ({estimate.error})" if estimate.error else "—"
+            else:
+                text = f"{estimate.bpm:6.1f} BPM  (conf {estimate.confidence:.2f})"
+            
+            if value_label is not None:
+                value_label.config(text=text)
+            if conf_bar is not None:
+                conf_bar.config(value=estimate.confidence * 100 if estimate.available else 0)
+        
+        if self.bpm_consensus_label is not None:
+            bpm, confidence = consensus_bpm(estimates)
+            if bpm is None:
+                self.bpm_consensus_label.config(text="—")
+            else:
+                self.bpm_consensus_label.config(text=f"{bpm:6.1f} BPM  (conf {confidence:.2f})")
     
     def _create_tier_tab(self, tier: str) -> ttk.Frame:
         """Create a tab for displaying metrics from one tier.

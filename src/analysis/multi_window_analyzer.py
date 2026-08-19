@@ -131,7 +131,6 @@ class MultiWindowAudioAnalyzer:
         Uses lock to prevent race conditions with record_beat_detection.
         
         Feeds FAST/MEDIUM features into SlowAnalyzer for better aggregation.
-        Uses LONGER window for beat/tempo analysis to capture multiple beats.
         
         Args:
             timestamp_s: Current timestamp
@@ -143,15 +142,10 @@ class MultiWindowAudioAnalyzer:
         # Request 1.5x window size to ensure we have enough data
         fast_duration_ms = (self.fast_analyzer.window_size_samples / self.sample_rate) * 1000 * 1.5
         medium_duration_ms = (self.medium_analyzer.window_size_samples / self.sample_rate) * 1000 * 1.5
-        
-        # CRITICAL: Use beat_analysis_window_ms (2s) not slow_window_ms (150ms) for beat analysis
-        # 150ms is too short to contain multiple beats; 2s captures ~4 beats at 120 BPM
-        beat_analysis_duration_ms = self.slow_analyzer.beat_analysis_window_ms * 1.5
         slow_duration_ms = (self.slow_analyzer.window_size_samples / self.sample_rate) * 1000 * 1.5
         
         fast_audio = self.get_recent_audio(fast_duration_ms)
         medium_audio = self.get_recent_audio(medium_duration_ms)
-        beat_audio = self.get_recent_audio(beat_analysis_duration_ms)  # Longer for beat analysis
         slow_audio = self.get_recent_audio(slow_duration_ms)
         
         # Run FAST and MEDIUM analyses
@@ -174,33 +168,23 @@ class MultiWindowAudioAnalyzer:
                 beat_confidence=self.last_beat_confidence,  # Use recorded beat confidence
             )
             
-            # Run SLOW analysis with normal window for overall metrics
+            # Run SLOW analysis (estimated_bpm/beat_stability are filled in
+            # afterwards by AudioProcessingWorker from the multi-method BPM
+            # consensus, not computed here - see src.analysis.bpm_detectors)
             slow_features = self.slow_analyzer.analyze(slow_audio, timestamp_s)
-            
-            # Run beat/tempo analysis with LONGER window to capture multiple beats
-            slow_features = self.slow_analyzer.analyze_beat_tempo(beat_audio, slow_features)
         
         return fast_features, medium_features, slow_features
     
-    def record_beat_detection(self, timestamp_s: float, beat_confidence: float = 1.0) -> bool:
-        """Record beat for tempo tracking.
+    def record_beat_detection(self, timestamp_s: float, beat_confidence: float = 1.0) -> None:
+        """Record the confidence of a just-detected beat.
         
-        THREAD-SAFE: Can be called by multiple processing workers simultaneously
+        THREAD-SAFE: Can be called by multiple processing workers simultaneously.
+        Feeds ``beat_confidence``/``beat_detected`` aggregation only - BPM is no
+        longer derived from beat timestamps (see src.analysis.bpm_detectors).
         
         Args:
-            timestamp_s: Timestamp of beat detection
+            timestamp_s: Timestamp of beat detection (unused, kept for API stability)
             beat_confidence: Confidence in beat detection (0-1)
-            
-        Returns:
-            True if beat was accepted, False if rejected (e.g., too close to previous beat)
         """
         with self.lock:  # Thread-safe: multiple workers may call this
             self.last_beat_confidence = beat_confidence
-            beat_accepted = self.slow_analyzer.record_beat(timestamp_s)
-            
-            if beat_accepted:
-                logger.info(f"[MultiWindowAnalyzer] Beat recorded @ {timestamp_s:.3f}s (confidence={beat_confidence:.2f})")
-            else:
-                logger.debug(f"[MultiWindowAnalyzer] Beat rejected @ {timestamp_s:.3f}s (too close to previous)")
-            
-            return beat_accepted

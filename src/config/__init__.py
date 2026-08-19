@@ -22,7 +22,6 @@ from .settings import (
     MEDIUM_WINDOW_MS,
     SLOW_WINDOW_MS,
     BEAT_ANALYSIS_WINDOW_MS,
-    BEAT_HISTORY_SIZE,
     TONALITY_HISTORY_SIZE,
     # Tiered analysis decimation
     SPECTRAL_ANALYSIS_DECIMATION,
@@ -49,6 +48,10 @@ from .settings import (
     LOG_LEVEL,
     DEBUG_WORKERS,
     DEBUG_ANALYSIS,
+    # Local API
+    API_HOST,
+    API_PORT,
+    API_BROADCAST_INTERVAL_S,
 )
 
 __all__ = [
@@ -64,7 +67,6 @@ __all__ = [
     "FAST_WINDOW_MS",
     "MEDIUM_WINDOW_MS",
     "SLOW_WINDOW_MS",
-    "BEAT_HISTORY_SIZE",
     # Tiered analysis decimation
     "SPECTRAL_ANALYSIS_DECIMATION",
     "TEMPO_ANALYSIS_DECIMATION",
@@ -90,4 +92,8 @@ __all__ = [
     "LOG_LEVEL",
     "DEBUG_WORKERS",
     "DEBUG_ANALYSIS",
+    # Local API
+    "API_HOST",
+    "API_PORT",
+    "API_BROADCAST_INTERVAL_S",
 ]

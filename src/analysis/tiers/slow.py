@@ -11,7 +11,6 @@ from src.config import (
     DEFAULT_SAMPLE_RATE,
     SLOW_WINDOW_MS,
     BEAT_ANALYSIS_WINDOW_MS,
-    BEAT_HISTORY_SIZE,
     TONALITY_HISTORY_SIZE,
     FREQ_BAND_BASS_MAX,
     FREQ_BAND_BASS_MIN,
@@ -28,28 +27,23 @@ logger = logging.getLogger(__name__)
 class SlowAnalyzer:
     """Analyzes audio in 100-500ms windows for overall shape, tempo, and tonality."""
     
-    def __init__(self, sample_rate: int = DEFAULT_SAMPLE_RATE, window_size_ms: float = SLOW_WINDOW_MS, beat_analysis_window_ms: float = BEAT_ANALYSIS_WINDOW_MS, max_beat_history: int = BEAT_HISTORY_SIZE):
+    def __init__(self, sample_rate: int = DEFAULT_SAMPLE_RATE, window_size_ms: float = SLOW_WINDOW_MS, beat_analysis_window_ms: float = BEAT_ANALYSIS_WINDOW_MS):
         """Initialize slow analyzer.
         
         Args:
             sample_rate: Audio sample rate in Hz (default from config)
             window_size_ms: Analysis window in milliseconds (default from config)
-            beat_analysis_window_ms: Longer window for beat/tempo analysis (default from config)
-            max_beat_history: Number of beats to track for tempo estimation (default from config)
+            beat_analysis_window_ms: Longer window sized for the multi-method BPM
+                analysis buffer (see src.engine.bpm_worker.BPMAnalysisWorker)
         """
         self.sample_rate = sample_rate
         self.window_size_ms = window_size_ms
         self.window_size_samples = int(window_size_ms * sample_rate / 1000)
         self.hop_size_samples = self.window_size_samples // 2
         
-        # Beat/Tempo analysis (SEPARATE from audio window analysis)
-        # beat_analysis_window_ms is much longer (2s) to capture multiple beats
+        # Kept only to size the shared circular buffer for BPMAnalysisWorker
         self.beat_analysis_window_ms = beat_analysis_window_ms
         self.beat_analysis_window_samples = int(beat_analysis_window_ms * sample_rate / 1000)
-        
-        # Tempo tracking
-        self.beat_timestamps = []
-        self.max_beat_history = max_beat_history
         
         # Energy history for trend calculation
         self.energy_history = []
@@ -89,41 +83,6 @@ class SlowAnalyzer:
         self.minor_profile = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
         
         logger.info(f"[SlowAnalyzer] {window_size_ms:.1f}ms windows ({self.window_size_samples} samples)")
-    
-    def record_beat(self, timestamp_s: float) -> bool:
-        """Record a beat detection for tempo estimation.
-        
-        Rejects beats that are too close together (violate min BPM limit).
-        Supports BPM range: 60-220 BPM
-        
-        Args:
-            timestamp_s: Timestamp of beat
-            
-        Returns:
-            True if beat was accepted and stored, False if rejected
-        """
-        # Reject beats too close together (< minimum interval for 220 BPM)
-        # This filters out spurious double-detections from the same transient
-        MIN_BEAT_INTERVAL = 60.0 / 220.0  # 220 BPM max ≈ 0.273s
-        
-        if len(self.beat_timestamps) > 0:
-            last_beat_time = self.beat_timestamps[-1]
-            interval_since_last = timestamp_s - last_beat_time
-            
-            if interval_since_last < MIN_BEAT_INTERVAL:
-                logger.debug(
-                    f"[SlowAnalyzer] Beat REJECTED: too soon after last beat "
-                    f"({interval_since_last:.3f}s < {MIN_BEAT_INTERVAL:.3f}s, min 220 BPM)"
-                )
-                return False
-        
-        # Beat is valid, store it
-        self.beat_timestamps.append(timestamp_s)
-        if len(self.beat_timestamps) > self.max_beat_history:
-            self.beat_timestamps.pop(0)
-        
-        logger.info(f"[SlowAnalyzer] Beat stored @ {timestamp_s:.3f}s. Total beats in history: {len(self.beat_timestamps)}/{self.max_beat_history}")
-        return True
     
     def _compute_chromagram(self, audio_mono: np.ndarray) -> np.ndarray:
         """Compute chromagram (energy in each pitch class).
@@ -424,58 +383,11 @@ class SlowAnalyzer:
         beat_detected = beat_confidence > 0.5  # Require >50% confidence (was 0.3, filtering noise)
         
         # ════════════════════════════════════════════════════════════════════
-        # TEMPO ESTIMATION (with beat interval validation)
+        # TEMPO: filled in by AudioProcessingWorker from the multi-method BPM
+        # consensus (src.analysis.bpm_detectors.consensus_bpm), not computed here.
         # ════════════════════════════════════════════════════════════════════
         estimated_bpm = None
         beat_stability = 0.0
-        
-        logger.debug(f"[SlowAnalyzer] Tempo estimation: {len(self.beat_timestamps)} beats in history (need 3+)")
-        
-        if len(self.beat_timestamps) >= 3:
-            intervals = np.diff(self.beat_timestamps)
-            
-            # VALIDATION: Filter by realistic BPM range (60-220 BPM for electronic music)
-            # BPM = 60 / interval_seconds, so:
-            # 220 BPM = 0.273s per beat (max fast tempo)
-            # 60 BPM = 1.0s per beat (min slow tempo)
-            MIN_INTERVAL = 60.0 / 220.0  # 220 BPM max ≈ 0.273s
-            MAX_INTERVAL = 60.0 / 60.0   # 60 BPM min = 1.0s
-            
-            valid_intervals = intervals[
-                (intervals >= MIN_INTERVAL) & (intervals <= MAX_INTERVAL)
-            ]
-            
-            if len(valid_intervals) >= 2:
-                # Use valid intervals for BPM calculation
-                avg_interval = np.mean(valid_intervals)
-                interval_std = np.std(valid_intervals)
-                
-                # Convert to BPM
-                if avg_interval > 0:
-                    beats_per_second = 1.0 / avg_interval
-                    estimated_bpm = beats_per_second * 60.0
-                    
-                    # Stability: how consistent are the intervals?
-                    # High stability = low coefficient of variation
-                    cv = interval_std / avg_interval if avg_interval > 0 else 0
-                    beat_stability = max(0.0, min(1.0, 1.0 - (cv / 0.2)))
-                    
-                    logger.info(
-                        f"[SlowAnalyzer] BPM CALCULATED: {estimated_bpm:.1f} BPM "
-                        f"(stability={beat_stability:.2f}, valid_intervals={len(valid_intervals)}/{len(intervals)}, "
-                        f"avg={avg_interval:.3f}s)"
-                    )
-                else:
-                    logger.warning(f"[SlowAnalyzer] BPM calc failed: avg_interval={avg_interval} <= 0")
-            else:
-                # Not enough valid intervals
-                logger.debug(
-                    f"[SlowAnalyzer] Too many invalid intervals: {len(intervals) - len(valid_intervals)}/{len(intervals)} "
-                    f"outside range [{MIN_INTERVAL}, {MAX_INTERVAL}]. "
-                    f"Intervals: {list(np.round(intervals, 3))}"
-                )
-        else:
-            logger.debug(f"[SlowAnalyzer] Not enough beats for BPM: {len(self.beat_timestamps)}/3 (need 3+)")
         
         # ════════════════════════════════════════════════════════════════════
         # FREQUENCY BAND ENVELOPES - for visualization
@@ -517,94 +429,3 @@ class SlowAnalyzer:
             band_mid_envelope=band_mid_envelope,
             band_high_envelope=band_high_envelope,
         )
-    
-    def analyze_beat_tempo(self, long_audio_chunk: np.ndarray, slow_features: SlowFeatures) -> SlowFeatures:
-        """Analyze beat/tempo from a LONGER audio window (2+ seconds).
-        
-        This is called after analyze() with a much longer audio window to provide
-        better BPM stability. The longer window lets us detect more beats and
-        calculate more stable tempo estimates.
-        
-        Args:
-            long_audio_chunk: Audio samples from longer window (2+ seconds)
-            slow_features: Previously calculated SlowFeatures from normal window
-            
-        Returns:
-            Updated SlowFeatures with improved beat_detected, estimated_bpm, beat_stability
-        """
-        try:
-            # Convert stereo to mono if needed
-            if long_audio_chunk.ndim == 2:
-                audio_mono = np.mean(long_audio_chunk, axis=1)
-            else:
-                audio_mono = long_audio_chunk
-            
-            # Only recalculate if we have enough beat data
-            if len(self.beat_timestamps) < 2:
-                return slow_features
-            
-            # Calculate BPM from accumulated beat timestamps
-            intervals = np.diff(self.beat_timestamps)
-            
-            # Filter outliers (very short or very long intervals)
-            # Reasonable range: 60-240 BPM = 0.25-1.0 seconds
-            valid_intervals = intervals[(intervals > 0.25) & (intervals < 1.0)]
-            
-            if len(valid_intervals) < 2:
-                # Not enough valid intervals yet
-                return slow_features
-            
-            avg_interval = np.mean(valid_intervals)
-            interval_std = np.std(valid_intervals)
-            
-            # Convert to BPM
-            if avg_interval > 0:
-                beats_per_second = 1.0 / avg_interval
-                estimated_bpm = beats_per_second * 60.0
-                
-                # Clamp to reasonable range (60-240 BPM)
-                estimated_bpm = max(60.0, min(240.0, estimated_bpm))
-                
-                # Stability: how consistent are the intervals?
-                # Normalized by comparing std to interval (coefficient of variation)
-                # Typical variation ~10% = stability 0.8-0.9
-                if avg_interval > 1e-10:
-                    cv = interval_std / avg_interval  # Coefficient of variation
-                    beat_stability = max(0.0, min(1.0, 1.0 - cv))
-                else:
-                    beat_stability = 0.0
-                
-                # Update slow_features with better beat analysis
-                # Replace the normal analysis with this longer-window version
-                return SlowFeatures(
-                    timestamp_s=slow_features.timestamp_s,
-                    # Keep all metrics from original
-                    overall_amplitude=slow_features.overall_amplitude,
-                    rms=slow_features.rms,
-                    peak=slow_features.peak,
-                    bass_energy=slow_features.bass_energy,
-                    mid_energy=slow_features.mid_energy,
-                    high_energy=slow_features.high_energy,
-                    spectral_density_low=slow_features.spectral_density_low,
-                    spectral_density_mid=slow_features.spectral_density_mid,
-                    spectral_density_high=slow_features.spectral_density_high,
-                    detected_key=slow_features.detected_key,
-                    key_confidence=slow_features.key_confidence,
-                    onset_detected=slow_features.onset_detected,
-                    beat_detected=slow_features.beat_detected,
-                    beat_confidence=slow_features.beat_confidence,
-                    # UPDATED: Better beat/tempo from longer window
-                    estimated_bpm=estimated_bpm,
-                    beat_stability=beat_stability,
-                    # Keep other metrics
-                    average_energy=slow_features.average_energy,
-                    energy_variance=slow_features.energy_variance,
-                    energy_trend=slow_features.energy_trend,
-                    band_bass_envelope=slow_features.band_bass_envelope,
-                    band_mid_envelope=slow_features.band_mid_envelope,
-                    band_high_envelope=slow_features.band_high_envelope,
-                )
-        except Exception as e:
-            logger.debug(f"Beat/tempo analysis error: {e}")
-            # Return original features if analysis fails
-            return slow_features

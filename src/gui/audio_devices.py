@@ -6,19 +6,24 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
+from src.config import DEFAULT_SAMPLE_RATE
+
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class AudioDevice:
-    """Represents an available audio device."""
+    """Represents an available audio device, or a running application's audio session."""
     device_id: int
     name: str
     channels: int
     sample_rate: int
-    device_type: str  # "input", "output", "loopback"
+    device_type: str  # "input", "output", "loopback", "application"
+    application_name: Optional[str] = None  # Process name, set only when device_type == "application"
     
     def __str__(self) -> str:
+        if self.device_type == "application":
+            return f"🎧 {self.name} (Application Audio)"
         return f"{self.name} ({self.device_type}, {self.channels}ch, {self.sample_rate}Hz)"
 
 
@@ -181,6 +186,51 @@ def get_available_audio_devices() -> list[AudioDevice]:
             device_type="input",
         ),
     ]
+
+
+def get_running_applications() -> list[AudioDevice]:
+    """Discover running applications that currently have a Windows audio session.
+
+    Each entry captures whole-system loopback audio when selected (see
+    ``src.sources.ApplicationAudioSource``); it is not isolated per-process.
+    Returns an empty list on non-Windows platforms or if pycaw isn't installed.
+    """
+    apps: list[AudioDevice] = []
+    try:
+        from pycaw.utils import AudioUtilities
+
+        seen_names: set[str] = set()
+        for session in AudioUtilities.GetAllSessions():
+            process = session.Process
+            if process is None:
+                continue
+            try:
+                process_name = process.name()
+            except Exception:
+                continue
+            key = process_name.casefold()
+            if not process_name or key in seen_names:
+                continue
+            seen_names.add(key)
+
+            display_name = (getattr(session, "DisplayName", "") or "").strip()
+            label = display_name if display_name else process_name
+
+            apps.append(AudioDevice(
+                device_id=-1,
+                name=label,
+                channels=2,
+                sample_rate=DEFAULT_SAMPLE_RATE,
+                device_type="application",
+                application_name=process_name,
+            ))
+    except ImportError:
+        logger.debug("pycaw not installed; running-application audio sources unavailable")
+    except Exception as e:
+        logger.error(f"Error enumerating running application audio sessions: {e}")
+
+    apps.sort(key=lambda d: d.name.casefold())
+    return apps
 
 
 def get_device_by_id(device_id: int) -> Optional[AudioDevice]:

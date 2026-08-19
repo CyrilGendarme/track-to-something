@@ -8,14 +8,15 @@ import logging
 from threading import Thread
 from typing import Optional, Callable
 
-from src.config import DEFAULT_SAMPLE_RATE, FREQ_BAND_BASS_MIN, FREQ_BAND_BASS_MAX, FREQ_BAND_HIGH_MAX
-from src.engine import AudioPipeline, get_performance_monitor
-from src.sources import AudioInputSource, AudioChunk
+from src.config import DEFAULT_SAMPLE_RATE, FREQ_BAND_BASS_MIN, FREQ_BAND_BASS_MAX, FREQ_BAND_HIGH_MAX, API_HOST, API_PORT
+from src.engine import AudioPipeline, FeatureCache, get_performance_monitor
+from src.sources import AudioInputSource, ApplicationAudioSource, AudioChunk
 from src.gui.theme import apply_theme, BG, BG_PANEL, BG_CARD, FG, FG_DIM, ACCENT, ACCENT2, FONT_UI, FONT_BOLD, FONT_TITLE
-from src.gui.audio_devices import get_available_audio_devices, AudioDevice
+from src.gui.audio_devices import get_available_audio_devices, get_running_applications, AudioDevice
 from src.gui.analysis_logger import AnalysisLogger
 from src.gui.metrics_display import RealTimeMetricsDisplay
 from src.analysis.tiers.features import FastFeatures, MediumFeatures, SlowFeatures
+from src.api import AnalysisAPIServer
 
 logger = logging.getLogger(__name__)
 
@@ -153,8 +154,8 @@ class AudioInputSelector(ttk.Frame):
         # Label
         ttk.Label(dropdown_frame, text="Device:", font=FONT_UI).pack(side=tk.LEFT, padx=(0, 5))
         
-        # Combo box
-        self.devices = get_available_audio_devices()
+        # Combo box - lists audio devices AND running applications' audio sessions
+        self.devices = self._load_devices()
         self.device_names = [str(d) for d in self.devices]
         
         self.combo = ttk.Combobox(
@@ -192,6 +193,10 @@ class AudioInputSelector(ttk.Frame):
         # Update info for selected device
         self._update_device_info()
     
+    def _load_devices(self) -> list[AudioDevice]:
+        """List audio devices followed by running applications' audio sessions."""
+        return get_available_audio_devices() + get_running_applications()
+    
     def _on_selection(self, event) -> None:
         """Handle device selection change."""
         index = self.combo.current()
@@ -209,8 +214,8 @@ class AudioInputSelector(ttk.Frame):
             self.info_labels["type"].config(text=f"Type: {self.selected_device.device_type.upper()}")
     
     def _refresh_devices(self) -> None:
-        """Refresh the device list."""
-        self.devices = get_available_audio_devices()
+        """Refresh the device list (audio devices + running applications)."""
+        self.devices = self._load_devices()
         self.device_names = [str(d) for d in self.devices]
         self.combo.config(values=self.device_names)
         
@@ -330,6 +335,71 @@ class AnalysisControlPanel(ttk.Frame):
         self.perf_labels["uptime"].config(text=f"Uptime: {uptime_s:.1f}s")
 
 
+class LocalApiPanel(ttk.Frame):
+    """Toggle for the local HTTP/WebSocket API - independent of analysis start/stop.
+
+    Other local apps can read the same analysis data the GUI displays,
+    whether or not the audio pipeline itself is currently running.
+    """
+
+    def __init__(
+        self,
+        parent: tk.Widget,
+        on_toggle: Callable[[bool], str | None] | None = None,
+        host: str = API_HOST,
+        port: int = API_PORT,
+        **kwargs,
+    ):
+        """Initialize the local API panel.
+
+        Args:
+            parent: Parent tkinter widget
+            on_toggle: Callback(enabled) -> error message, or None on success
+            host: API host to display
+            port: API port to display
+        """
+        super().__init__(parent, **kwargs)
+        self.on_toggle = on_toggle
+        self.host = host
+        self.port = port
+
+        title_label = ttk.Label(self, text="Local API", font=FONT_BOLD)
+        title_label.pack(anchor=tk.W, padx=5, pady=(5, 0))
+
+        row = ttk.Frame(self)
+        row.pack(fill=tk.X, padx=10, pady=5)
+
+        self.enabled_var = tk.BooleanVar(value=False)
+        self.checkbox = ttk.Checkbutton(
+            row, text="Enable Local API", variable=self.enabled_var, command=self._on_toggle
+        )
+        self.checkbox.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.status_label = ttk.Label(row, text="Disabled", font=FONT_UI, foreground=FG_DIM)
+        self.status_label.pack(side=tk.LEFT)
+
+        url_label = ttk.Label(
+            self,
+            text=f"http://{host}:{port}  (GET /features, /features/bpm, WS /ws)",
+            font=FONT_UI,
+            foreground=FG_DIM,
+        )
+        url_label.pack(anchor=tk.W, padx=10, pady=(0, 5))
+
+    def _on_toggle(self) -> None:
+        enabled = self.enabled_var.get()
+        error = self.on_toggle(enabled) if self.on_toggle else None
+        if error:
+            self.enabled_var.set(not enabled)
+            self.status_label.config(text=f"Error: {error}", foreground="#e05555")
+            return
+        if enabled:
+            self.status_label.config(text=f"Running on {self.host}:{self.port}", foreground=ACCENT)
+        else:
+            self.status_label.config(text="Disabled", foreground=FG_DIM)
+
+
+
 class AudioAnalysisGUI(tk.Tk):
     """Main GUI application for audio analysis."""
     
@@ -389,6 +459,10 @@ class AudioAnalysisGUI(tk.Tk):
         )
         self.control_panel.pack(fill=tk.X, padx=0)
         
+        # Local API toggle (independent of analysis start/stop)
+        self.api_panel = LocalApiPanel(left_panel, on_toggle=self._on_toggle_api)
+        self.api_panel.pack(fill=tk.X, padx=0, pady=(10, 0))
+        
         # Right panel (analysis results)
         right_panel = ttk.Frame(main_frame)
         right_panel.grid(row=1, column=1, sticky="nsew")
@@ -409,10 +483,17 @@ class AudioAnalysisGUI(tk.Tk):
         self.pipeline_thread: Optional[Thread] = None
         self.selected_device: Optional[AudioDevice] = None
         
+        # Persistent feature cache: outlives individual pipeline start/stop
+        # cycles so the local API can keep serving the latest data regardless
+        # of whether analysis is currently running.
+        self.feature_cache = FeatureCache()
+        self.api_server = AnalysisAPIServer(self.feature_cache)
+        
         # Feature tracking
         self.last_fast_features: Optional[FastFeatures] = None
         self.last_medium_features: Optional[MediumFeatures] = None
         self.last_slow_features: Optional[SlowFeatures] = None
+        self.last_bpm_estimates: dict = {}
         
         # Start periodic metrics update
         self._update_metrics_display()
@@ -420,6 +501,25 @@ class AudioAnalysisGUI(tk.Tk):
         # Event callback for pipeline
         self.event_count = 0
         self.chunk_count = 0
+    
+    def _on_toggle_api(self, enabled: bool) -> Optional[str]:
+        """Start or stop the local API server.
+        
+        Args:
+            enabled: True to start the server, False to stop it
+            
+        Returns:
+            An error message on failure, or None on success
+        """
+        try:
+            if enabled:
+                self.api_server.start()
+            else:
+                self.api_server.stop()
+            return None
+        except Exception as e:
+            logger.error(f"Error toggling local API: {e}")
+            return str(e)
     
     def _on_audio_device_change(self, device: AudioDevice) -> None:
         """Handle audio device selection change.
@@ -442,19 +542,30 @@ class AudioAnalysisGUI(tk.Tk):
             return
         
         try:
-            # Create audio source
-            audio_source = AudioInputSource(
-                device=self.selected_device.device_id,
-                sample_rate=self.selected_device.sample_rate,
-                block_size=2048,
-            )
+            # Create audio source: a running application uses whole-system
+            # loopback (see ApplicationAudioSource), everything else is a
+            # regular input/loopback device.
+            if self.selected_device.device_type == "application":
+                audio_source = ApplicationAudioSource(
+                    application_name=self.selected_device.application_name,
+                    sample_rate=self.selected_device.sample_rate,
+                    block_size=2048,
+                )
+            else:
+                audio_source = AudioInputSource(
+                    device=self.selected_device.device_id,
+                    sample_rate=self.selected_device.sample_rate,
+                    block_size=2048,
+                )
             
-            # Create pipeline
+            # Create pipeline (shares the persistent feature_cache so the
+            # local API keeps serving data across start/stop cycles)
             self.pipeline = AudioPipeline(
                 audio_source=lambda: audio_source,
                 n_processing_workers=4,
                 sample_rate=self.selected_device.sample_rate,
                 event_callback=self._on_pipeline_event,
+                feature_cache=self.feature_cache,
             )
             
             # Start pipeline in separate thread
@@ -513,6 +624,10 @@ class AudioAnalysisGUI(tk.Tk):
                 self.last_fast_features = fast
                 self.last_medium_features = medium
                 self.last_slow_features = slow
+            
+            bpm_estimates = self.pipeline.feature_cache.get_bpm_estimates()
+            if bpm_estimates:
+                self.last_bpm_estimates = bpm_estimates
         
         # Update the metrics display
         self.metrics_display.update_features(
@@ -520,6 +635,7 @@ class AudioAnalysisGUI(tk.Tk):
             self.last_medium_features,
             self.last_slow_features,
         )
+        self.metrics_display.update_bpm_estimates(self.last_bpm_estimates)
         
         # Schedule next update (every 100ms = ~10 FPS)
         self.after(100, self._update_metrics_display)
