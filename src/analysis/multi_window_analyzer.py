@@ -119,6 +119,8 @@ class MultiWindowAudioAnalyzer:
     def analyze_all(self, timestamp_s: float) -> tuple[FastFeatures, MediumFeatures, SlowFeatures]:
         """Run all three analyzers on current buffer state.
         
+        Feeds FAST/MEDIUM features into SlowAnalyzer for better aggregation.
+        
         Args:
             timestamp_s: Current timestamp
             
@@ -135,8 +137,23 @@ class MultiWindowAudioAnalyzer:
         medium_audio = self.get_recent_audio(medium_duration_ms)
         slow_audio = self.get_recent_audio(slow_duration_ms)
         
+        # Run FAST and MEDIUM analyses
         fast_features = self.fast_analyzer.analyze(fast_audio, timestamp_s)
         medium_features = self.medium_analyzer.analyze(medium_audio, timestamp_s)
+        
+        # Feed FAST/MEDIUM metrics into SlowAnalyzer for aggregation
+        # This allows slow tier to accumulate metrics for better trends
+        self.slow_analyzer.update_metrics(
+            overall_amplitude=fast_features.raw_energy,
+            rms=fast_features.raw_energy,  # Use raw_energy as proxy for RMS
+            bass_energy=medium_features.bass_energy,
+            mid_energy=medium_features.mid_energy,
+            high_energy=medium_features.high_energy,
+            onset_detected=fast_features.onset_detected,
+            beat_confidence=0.0,  # Will be set by beat detection
+        )
+        
+        # Run SLOW analysis with all metrics aggregated
         slow_features = self.slow_analyzer.analyze(slow_audio, timestamp_s)
         
         return fast_features, medium_features, slow_features

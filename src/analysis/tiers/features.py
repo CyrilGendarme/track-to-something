@@ -57,20 +57,62 @@ class MediumFeatures:
 class SlowFeatures:
     """Slow features (100-500ms latency).
     
-    For scene/palette changes: overall energy shape, tempo tracking.
+    For scene/palette changes: overall energy shape, tempo tracking, tonality analysis.
+    Aggregates all FAST, MEDIUM metrics over longer time window (0.5-2.0s) for big-picture analysis.
     """
     timestamp_s: float
     
-    # Song-level metrics (over 0.5-2.0 second windows)
+    # ════════════════════════════════════════════════════════════════════
+    # AMPLITUDE METRICS (aggregated from FAST tier over window)
+    # ════════════════════════════════════════════════════════════════════
+    overall_amplitude: float      # 0-1 (peak absolute value in window)
+    rms: float                    # 0-1 (RMS energy in window)
+    peak: float                   # 0-1 (peak volume in window)
+    
+    # ════════════════════════════════════════════════════════════════════
+    # FREQUENCY BAND ENERGY (aggregated from MEDIUM tier over window)
+    # ════════════════════════════════════════════════════════════════════
+    bass_energy: float            # 0-1 (20-250 Hz average)
+    mid_energy: float             # 0-1 (250-4000 Hz average)
+    high_energy: float            # 0-1 (4000-20000 Hz average)
+    
+    # ════════════════════════════════════════════════════════════════════
+    # SPECTRAL CHARACTERISTICS (average over window for color palette)
+    # ════════════════════════════════════════════════════════════════════
+    spectral_centroid_hz: float   # Weighted average frequency
+    spectral_density_low: float   # 0-1 (proportion of energy in bass)
+    spectral_density_mid: float   # 0-1 (proportion of energy in mids)
+    spectral_density_high: float  # 0-1 (proportion of energy in highs)
+    
+    # ════════════════════════════════════════════════════════════════════
+    # TONALITY ANALYSIS (musical key detection)
+    # ════════════════════════════════════════════════════════════════════
+    detected_key: str | None      # Musical key (e.g., "C", "F#m", "Bm", "Db")
+    key_confidence: float         # 0-1 (confidence in key detection)
+    
+    # ════════════════════════════════════════════════════════════════════
+    # TRANSIENT & BEAT DETECTION (aggregated from FAST tier)
+    # ════════════════════════════════════════════════════════════════════
+    onset_detected: bool          # Any onsets in window
+    beat_detected: bool           # Beat peaks detected
+    beat_confidence: float        # 0-1 (average beat confidence)
+    
+    # ════════════════════════════════════════════════════════════════════
+    # TEMPO TRACKING (for animation speed)
+    # ════════════════════════════════════════════════════════════════════
+    estimated_bpm: float | None   # Beats per minute
+    beat_stability: float         # 0-1 (how consistent is the tempo)
+    
+    # ════════════════════════════════════════════════════════════════════
+    # DYNAMICS & TREND (overall song energy → scene changes)
+    # ════════════════════════════════════════════════════════════════════
     average_energy: float         # Mean energy over window
     energy_variance: float        # Std dev (0-1)
     energy_trend: float           # -1 to 1 (decreasing to increasing)
     
-    # Estimated tempo from beat intervals
-    estimated_bpm: float | None   # Beats per minute
-    beat_stability: float         # 0-1 (how consistent is the tempo)
-    
-    # Overall spectral shape (for color palette)
-    spectral_density_low: float   # 0-1 (proportion of energy in bass)
-    spectral_density_mid: float   # 0-1 (proportion of energy in mids)
-    spectral_density_high: float  # 0-1 (proportion of energy in highs)
+    # ════════════════════════════════════════════════════════════════════
+    # FREQUENCY BAND ENVELOPES (for smooth visualization)
+    # ════════════════════════════════════════════════════════════════════
+    band_bass_envelope: tuple[float, ...] | None      # Bass energy over time
+    band_mid_envelope: tuple[float, ...] | None       # Mid energy over time
+    band_high_envelope: tuple[float, ...] | None      # High energy over time

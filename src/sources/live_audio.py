@@ -8,7 +8,7 @@ from typing import Iterator
 import numpy as np
 import sounddevice as sd
 
-from src.config import DEFAULT_SAMPLE_RATE, LOOPBACK_DEFAULT_SAMPLE_RATE
+from src.config import DEFAULT_SAMPLE_RATE
 from .audio_source import AudioChunk
 
 
