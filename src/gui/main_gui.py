@@ -7,6 +7,7 @@ from tkinter import ttk
 import logging
 from threading import Thread
 from typing import Optional, Callable
+from queue import Empty
 
 from src.config import DEFAULT_SAMPLE_RATE, FREQ_BAND_BASS_MIN, FREQ_BAND_BASS_MAX, FREQ_BAND_HIGH_MAX
 from src.engine import AudioPipeline, get_performance_monitor
@@ -14,6 +15,8 @@ from src.sources import AudioInputSource, AudioChunk
 from src.gui.theme import apply_theme, BG, BG_PANEL, BG_CARD, FG, FG_DIM, ACCENT, ACCENT2, FONT_UI, FONT_BOLD, FONT_TITLE
 from src.gui.audio_devices import get_available_audio_devices, AudioDevice
 from src.gui.analysis_logger import AnalysisLogger
+from src.gui.metrics_display import RealTimeMetricsDisplay
+from src.analysis.tiers.features import FastFeatures, MediumFeatures, SlowFeatures
 
 logger = logging.getLogger(__name__)
 
@@ -391,16 +394,29 @@ class AudioAnalysisGUI(tk.Tk):
         right_panel = ttk.Frame(main_frame)
         right_panel.grid(row=1, column=1, sticky="nsew")
         right_panel.grid_rowconfigure(0, weight=1)
+        right_panel.grid_rowconfigure(1, weight=2)
         right_panel.grid_columnconfigure(0, weight=1)
         
-        # Analysis logger
+        # Metrics display (real-time metrics)
+        self.metrics_display = RealTimeMetricsDisplay(right_panel)
+        self.metrics_display.grid(row=0, column=0, sticky="nsew", padx=0, pady=(0, 5))
+        
+        # Analysis logger (latency log)
         self.analysis_logger = AnalysisLogger(right_panel)
-        self.analysis_logger.pack(fill=tk.BOTH, expand=True)
+        self.analysis_logger.grid(row=1, column=0, sticky="nsew", padx=0, pady=0)
         
         # Pipeline state
         self.pipeline: Optional[AudioPipeline] = None
         self.pipeline_thread: Optional[Thread] = None
         self.selected_device: Optional[AudioDevice] = None
+        
+        # Feature tracking
+        self.last_fast_features: Optional[FastFeatures] = None
+        self.last_medium_features: Optional[MediumFeatures] = None
+        self.last_slow_features: Optional[SlowFeatures] = None
+        
+        # Start periodic metrics update
+        self._update_metrics_display()
         
         # Event callback for pipeline
         self.event_count = 0
@@ -487,6 +503,55 @@ class AudioAnalysisGUI(tk.Tk):
                 latency_ms=0.0,
                 frequency_range="--",
             )
+    
+    def _update_metrics_display(self) -> None:
+        """Periodically update metrics display with latest features from pipeline."""
+        if self.pipeline and self.pipeline.is_running():
+            # Try to extract latest features from processing queue
+            # We extract them from the features queue without blocking
+            try:
+                # Get latest features message (try multiple times to get the most recent)
+                latest_msg = None
+                while True:
+                    try:
+                        msg = self.pipeline.features_queue.get_nowait()
+                        latest_msg = msg
+                    except Empty:
+                        break
+                
+                # Extract tiered features from AudioFeaturesMessage
+                if latest_msg:
+                    # For now, create basic feature objects from the message data
+                    # In a full implementation, these would be extracted directly from analyzers
+                    self.last_fast_features = FastFeatures(
+                        timestamp_s=latest_msg.timestamp_s,
+                        onset_detected=latest_msg.onset_detected,
+                        onset_strength=0.0,  # Not in message
+                        is_percussive_peak=False,
+                        percussive_peak_strength=latest_msg.peak,
+                        raw_energy=latest_msg.rms,
+                    )
+                    self.last_medium_features = MediumFeatures(
+                        timestamp_s=latest_msg.timestamp_s,
+                        bass_energy=latest_msg.bass_energy,
+                        mid_energy=latest_msg.mid_energy,
+                        high_energy=latest_msg.high_energy,
+                        bass_energy_delta=0.0,
+                        overall_energy_delta=0.0,
+                    )
+                    # Note: Slow features would need to come from the slow analyzer
+            except Exception as e:
+                logger.debug(f"Error extracting features: {e}")
+        
+        # Update the metrics display
+        self.metrics_display.update_features(
+            self.last_fast_features,
+            self.last_medium_features,
+            self.last_slow_features,
+        )
+        
+        # Schedule next update (every 100ms = ~10 FPS)
+        self.after(100, self._update_metrics_display)
     
     def _on_pipeline_event(self, event_type: str, data: dict) -> None:
         """Handle events from the pipeline.
