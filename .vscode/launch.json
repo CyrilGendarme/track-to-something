@@ -1,0 +1,106 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "GUI: Audio Analysis Monitor",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/gui/main_gui.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        },
+        {
+            "name": "Test: Streaming Pipeline",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pytest",
+            "args": [
+                "-v",
+                "-s",
+                "tests/test_audio_sources_analysis.py::test_local_file_streaming_pipeline"
+            ],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        },
+        {
+            "name": "Example: Tiered Analysis",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/examples/tiered_analysis_example.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        },
+        {
+            "name": "Example: Rendering",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/examples/rendering_example.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        },
+        {
+            "name": "Example: Events vs Signals",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/examples/events_vs_signals_example.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        },
+        {
+            "name": "Example: Predictive Demo",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/examples/predictive_demo.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        },
+        {
+            "name": "Example: Basic Usage",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/examples/example.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        }
+    ],
+    "compounds": [
+        {
+            "name": "Examples: run all demonstrations",
+            "configurations": [
+                "Example: Tiered Analysis",
+                "Example: Rendering",
+                "Example: Events vs Signals",
+                "Example: Predictive Demo",
+                "Example: Basic Usage"
+            ],
+            "stopAll": true
+        }
+}
