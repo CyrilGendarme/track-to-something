@@ -14,3 +14,12 @@ sqlcipher3           # DBAPI2 driver pulled in by pyrekordbox; imported directly
 mido
 python-rtmidi
 rapidfuzz
+pycaw; sys_platform == 'win32'   # Enumerate running apps' Windows audio sessions for the "Audio Input" dropdown
+aiohttp
+
+# Optional extra BPM detectors (src/analysis/bpm_detectors.py auto-detects
+# availability and gracefully skips these if not installed):
+# aubio          # pip install aubio (may need a C++ build toolchain on Windows)
+# madmom         # pip install madmom (unmaintained; requires Cython + numpy<2 at build time)
+# essentia       # pip install essentia-tensorflow (no official Windows wheels; Linux/macOS/WSL only)
+
