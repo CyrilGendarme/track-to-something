@@ -146,17 +146,53 @@ class AudioProcessingWorker(QueuedWorker):
         self.hop_length = hop_length
         self.sample_rate = DEFAULT_SAMPLE_RATE
         self.timestamp = 0.0
+        
+        # TIERED ANALYSIS: Track which analyses to skip on this chunk
+        self._chunk_counter = 0
+        from src.config import SPECTRAL_ANALYSIS_DECIMATION, TEMPO_ANALYSIS_DECIMATION
+        self.spectral_decimation = SPECTRAL_ANALYSIS_DECIMATION
+        self.tempo_decimation = TEMPO_ANALYSIS_DECIMATION
+        
+        # Cache spectral data between chunks for stability
+        self._prev_magnitude: np.ndarray | None = None
+        self._prev_frame_energy: np.ndarray | None = None
 
     def _process_item(self, item: AudioChunkMessage) -> None:
-        """Analyze audio chunk and extract comprehensive features."""
+        """Analyze audio chunk with TIERED ANALYSIS strategy.
+        
+        ═══════════════════════════════════════════════════════════════════════
+        TIERED ANALYSIS: Different features at different refresh rates
+        ═══════════════════════════════════════════════════════════════════════
+        
+        FAST TIER (Every chunk, ~5-10ms):
+        - Overall amplitude (RMS, peak, max)
+        - Beat detection (simple envelope)
+        - Onset detection (spectral flux - not librosa)
+        - Use: Kick flash, snare burst, immediate effects
+        
+        MEDIUM TIER (Every 2-3 chunks, ~20-50ms):
+        - Full STFT spectral analysis
+        - Spectral centroid (brightness)
+        - Frequency band energy (bass, mid, high)
+        - Band envelopes
+        - Use: Smooth animations, energy tracking
+        
+        SLOW TIER (Every 8+ chunks, ~300-700ms):
+        - Tempo/BPM estimation
+        - Use: Scene changes, animation speed
+        """
         try:
             perf = get_performance_monitor()
             process_start = time.perf_counter()
             
             import librosa
-            from scipy import signal
             
             self.sample_rate = item.sample_rate
+            self._chunk_counter += 1
+            
+            # Determine which analyses to run on this chunk
+            do_spectral = (self._chunk_counter % self.spectral_decimation) == 0
+            do_tempo = (self._chunk_counter % self.tempo_decimation) == 0
             
             # Convert stereo to mono
             if item.samples.ndim == 2:
@@ -164,13 +200,31 @@ class AudioProcessingWorker(QueuedWorker):
             else:
                 mono = item.samples
             
-            # 1. Overall amplitude metrics
+            # ════════════════════════════════════════════════════════════════════
+            # FAST TIER: ALWAYS RUN (< 10ms) - Amplitude, Beat, Onset
+            # ════════════════════════════════════════════════════════════════════
+            
+            # 1. Overall amplitude metrics (FAST)
             with perf.timing_context("process:amplitude_metrics"):
                 overall_amplitude = float(np.max(np.abs(mono)))
                 rms = float(np.sqrt(np.mean(mono ** 2)))
                 peak = float(np.max(np.abs(mono)))
             
-            # 2. Spectral analysis
+            # 2. Fast beat detection (FAST - envelope-based, no STFT)
+            with perf.timing_context("process:beat_detection"):
+                # Use amplitude envelope for rapid beat detection
+                mono_env = np.abs(mono)
+                env_rms = np.sqrt(np.mean(mono_env ** 2))
+                beat_threshold = env_rms * 1.5
+                beat_detected = overall_amplitude > beat_threshold
+                
+                # Beat confidence: normalized above threshold (0-1)
+                if beat_threshold > 1e-10:
+                    beat_confidence = min(1.0, (overall_amplitude / beat_threshold) / 3.0)
+                else:
+                    beat_confidence = 0.0
+            
+            # 3. STFT: Always compute for onset detection and optional spectral analysis
             with perf.timing_context("process:stft"):
                 spectrum = librosa.stft(
                     mono, n_fft=self.n_fft, hop_length=self.hop_length, center=True
@@ -180,65 +234,86 @@ class AudioProcessingWorker(QueuedWorker):
                 frame_energy = magnitude.mean(axis=0)
                 total_energy = float(magnitude.sum())
             
-            # 3. Spectral features
-            with perf.timing_context("process:spectral_features"):
-                if total_energy > 1e-10:
-                    centroid = float(librosa.feature.spectral_centroid(
-                        S=magnitude, sr=self.sample_rate, n_fft=self.n_fft
-                    )[0].mean())
-                    
-                    dominant_bin = int(np.argmax(magnitude.sum(axis=1)))
-                    dominant_freq = float(frequencies[dominant_bin])
-                else:
-                    centroid = 0.0
-                    dominant_freq = 0.0
-            
-            # 4. Energy in frequency bands
-            with perf.timing_context("process:frequency_bands"):
-                bass_mask = frequencies < 250
-                mid_mask = (frequencies >= 250) & (frequencies < 4000)
-                high_mask = frequencies >= 4000
-                
-                bass_energy = float(np.mean(magnitude[bass_mask, :]))
-                mid_energy = float(np.mean(magnitude[mid_mask, :]))
-                high_energy = float(np.mean(magnitude[high_mask, :]))
-                
-                # Normalize to 0-1 range
-                max_band_energy = max(bass_energy, mid_energy, high_energy, 1e-10)
-                bass_energy = bass_energy / max_band_energy
-                mid_energy = mid_energy / max_band_energy
-                high_energy = high_energy / max_band_energy
-            
-            # 5. Beat detection with confidence
-            with perf.timing_context("process:beat_detection"):
-                frame_rms = np.sqrt(np.mean(frame_energy ** 2))
-                beat_threshold = frame_rms * 1.5
-                beat_detected = bool(np.any(frame_energy > beat_threshold))
-                
-                # Beat confidence: how much above threshold
-                if frame_rms > 0:
-                    beat_strength = np.max(frame_energy) / (beat_threshold + 1e-10)
-                    beat_confidence = min(1.0, beat_strength / 3.0)  # Normalize to 0-1
-                else:
-                    beat_confidence = 0.0
-            
-            # 6. Onset/attack detection (rapid amplitude rise)
+            # 4. Fast onset detection using spectral flux (FAST)
+            # Much faster than librosa.onset.onset_strength()
             with perf.timing_context("process:onset_detection"):
-                onset_envelope = librosa.onset.onset_strength(y=mono, sr=self.sample_rate)
-                onset_detected = bool(np.any(onset_envelope > np.mean(onset_envelope) * 2.0))
-            
-            # 7. Tempo estimation
-            with perf.timing_context("process:tempo_estimation"):
-                if len(frame_energy) > 1:
-                    bpm = self._estimate_tempo(frame_energy, self.sample_rate)
+                if magnitude.shape[1] > 1 and self._prev_magnitude is not None:
+                    # Spectral flux: changes in magnitude spectrum frame-to-frame
+                    mag_diff = magnitude - self._prev_magnitude
+                    flux = np.sqrt(np.sum(mag_diff ** 2, axis=0))
+                    
+                    if len(flux) > 1:
+                        flux_mean = np.mean(flux)
+                        flux_std = np.std(flux)
+                        flux_threshold = flux_mean + (flux_std * 2.5)
+                        onset_detected = bool(np.any(flux > flux_threshold))
+                    else:
+                        onset_detected = False
                 else:
-                    bpm = None
+                    onset_detected = False
             
-            # 8. Frequency band envelopes (for visualization)
-            with perf.timing_context("process:band_envelopes"):
-                band_bass_envelope = tuple(magnitude[bass_mask, :].mean(axis=0)[:10])
-                band_mid_envelope = tuple(magnitude[mid_mask, :].mean(axis=0)[:10])
-                band_high_envelope = tuple(magnitude[high_mask, :].mean(axis=0)[:10])
+            # Cache magnitude for next frame's onset detection
+            self._prev_magnitude = magnitude.copy()
+            self._prev_frame_energy = frame_energy.copy() if frame_energy is not None else None
+            
+            # ════════════════════════════════════════════════════════════════════
+            # MEDIUM TIER: EVERY 2-3 CHUNKS (~20-50ms) - Spectral Features
+            # ════════════════════════════════════════════════════════════════════
+            
+            centroid = 0.0
+            dominant_freq = 0.0
+            bass_energy = 0.0
+            mid_energy = 0.0
+            high_energy = 0.0
+            band_bass_envelope = None
+            band_mid_envelope = None
+            band_high_envelope = None
+            
+            if do_spectral:
+                # 5. Spectral features (MEDIUM)
+                with perf.timing_context("process:spectral_features"):
+                    if total_energy > 1e-10:
+                        # Spectral centroid: weighted average of frequencies
+                        power = magnitude.sum(axis=1)
+                        centroid = float(np.sum(frequencies * power) / np.sum(power))
+                        
+                        # Dominant frequency
+                        dominant_bin = int(np.argmax(power))
+                        dominant_freq = float(frequencies[dominant_bin])
+                    else:
+                        centroid = 0.0
+                        dominant_freq = 0.0
+                
+                # 6. Energy in frequency bands (MEDIUM)
+                with perf.timing_context("process:frequency_bands"):
+                    bass_mask = frequencies < 250
+                    mid_mask = (frequencies >= 250) & (frequencies < 4000)
+                    high_mask = frequencies >= 4000
+                    
+                    bass_energy = float(np.mean(magnitude[bass_mask, :]))
+                    mid_energy = float(np.mean(magnitude[mid_mask, :]))
+                    high_energy = float(np.mean(magnitude[high_mask, :]))
+                    
+                    # Normalize to 0-1 range
+                    max_band_energy = max(bass_energy, mid_energy, high_energy, 1e-10)
+                    bass_energy = bass_energy / max_band_energy
+                    mid_energy = mid_energy / max_band_energy
+                    high_energy = high_energy / max_band_energy
+                
+                # 7. Frequency band envelopes (MEDIUM)
+                with perf.timing_context("process:band_envelopes"):
+                    band_bass_envelope = tuple(magnitude[bass_mask, :].mean(axis=0)[:10])
+                    band_mid_envelope = tuple(magnitude[mid_mask, :].mean(axis=0)[:10])
+                    band_high_envelope = tuple(magnitude[high_mask, :].mean(axis=0)[:10])
+            
+            # ════════════════════════════════════════════════════════════════════
+            # SLOW TIER: EVERY 8+ CHUNKS (~300-700ms) - Tempo Estimation
+            # ════════════════════════════════════════════════════════════════════
+            
+            bpm = None
+            if do_tempo and frame_energy is not None and len(frame_energy) > 1:
+                with perf.timing_context("process:tempo_estimation"):
+                    bpm = self._estimate_tempo(frame_energy, self.sample_rate)
             
             # Create comprehensive features message
             features = AudioFeaturesMessage(
@@ -265,13 +340,18 @@ class AudioProcessingWorker(QueuedWorker):
             
             self.timestamp += len(mono) / self.sample_rate
             
-            # Log timing every 50 chunks
+            # Log timing every 100 chunks
             if not hasattr(self, '_chunk_count'):
                 self._chunk_count = 0
             self._chunk_count += 1
-            if self._chunk_count % 50 == 0:
+            if self._chunk_count % 100 == 0:
                 process_duration_ms = (time.perf_counter() - process_start) * 1000
-                logger.debug(f"[{self.name}] Chunk {self._chunk_count}: {process_duration_ms:.2f}ms")
+                tier_msg = f"[FAST] {process_duration_ms:.2f}ms"
+                if do_spectral:
+                    tier_msg = f"[FAST+MEDIUM] {process_duration_ms:.2f}ms"
+                if do_tempo:
+                    tier_msg = f"[FAST+MEDIUM+SLOW] {process_duration_ms:.2f}ms"
+                logger.debug(f"[{self.name}] Chunk {self._chunk_count}: {tier_msg}")
             
         except Exception as e:
             logger.exception(f"[{self.name}] Processing error")
