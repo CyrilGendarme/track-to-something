@@ -70,6 +70,9 @@ class MultiWindowAudioAnalyzer:
         self.write_pos = 0
         self.lock = threading.RLock()
         
+        # Track latest beat confidence for passing to slow analyzer
+        self.last_beat_confidence = 0.0
+        
         logger.info(f"[MultiWindowAnalyzer] Initialized with shared buffer: {self.buffer_size_ms:.0f}ms")
     
     def add_audio_chunk(self, audio_chunk: np.ndarray) -> None:
@@ -143,6 +146,7 @@ class MultiWindowAudioAnalyzer:
         
         # Feed FAST/MEDIUM metrics into SlowAnalyzer for aggregation
         # This allows slow tier to accumulate metrics for better trends
+        # Use last recorded beat confidence for accurate beat tracking
         self.slow_analyzer.update_metrics(
             overall_amplitude=fast_features.raw_energy,
             rms=fast_features.raw_energy,  # Use raw_energy as proxy for RMS
@@ -150,7 +154,7 @@ class MultiWindowAudioAnalyzer:
             mid_energy=medium_features.mid_energy,
             high_energy=medium_features.high_energy,
             onset_detected=fast_features.onset_detected,
-            beat_confidence=0.0,  # Will be set by beat detection
+            beat_confidence=self.last_beat_confidence,  # Use recorded beat confidence
         )
         
         # Run SLOW analysis with all metrics aggregated
@@ -158,10 +162,12 @@ class MultiWindowAudioAnalyzer:
         
         return fast_features, medium_features, slow_features
     
-    def record_beat_detection(self, timestamp_s: float) -> None:
+    def record_beat_detection(self, timestamp_s: float, beat_confidence: float = 1.0) -> None:
         """Record beat for tempo tracking.
         
         Args:
             timestamp_s: Timestamp of beat detection
+            beat_confidence: Confidence in beat detection (0-1)
         """
+        self.last_beat_confidence = beat_confidence
         self.slow_analyzer.record_beat(timestamp_s)

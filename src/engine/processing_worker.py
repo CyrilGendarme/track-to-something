@@ -217,20 +217,6 @@ class AudioProcessingWorker(QueuedWorker):
                 rms = float(np.sqrt(np.mean(mono ** 2)))
                 peak = float(np.max(np.abs(mono)))
             
-            # 2. Fast beat detection (FAST - envelope-based, no STFT)
-            with perf.timing_context("process:beat_detection"):
-                # Use amplitude envelope for rapid beat detection
-                mono_env = np.abs(mono)
-                env_rms = np.sqrt(np.mean(mono_env ** 2))
-                beat_threshold = env_rms * 1.5
-                beat_detected = overall_amplitude > beat_threshold
-                
-                # Beat confidence: normalized above threshold (0-1)
-                if beat_threshold > 1e-10:
-                    beat_confidence = min(1.0, (overall_amplitude / beat_threshold) / 3.0)
-                else:
-                    beat_confidence = 0.0
-            
             # 3. STFT: Always compute for onset detection and optional spectral analysis
             with perf.timing_context("process:stft"):
                 # Replace librosa.stft with scipy.signal.stft (faster, no librosa dependency)
@@ -247,25 +233,47 @@ class AudioProcessingWorker(QueuedWorker):
                 frame_energy = magnitude.mean(axis=0)
                 total_energy = float(magnitude.sum())
             
-            # 4. Fast onset detection using spectral flux (FAST)
-            # Much faster than librosa.onset.onset_strength()
-            with perf.timing_context("process:onset_detection"):
+            # 2+4. Beat & Onset detection using spectral flux (more reliable than amplitude)
+            with perf.timing_context("process:beat_onset_detection"):
+                beat_detected = False
+                beat_confidence = 0.0
+                onset_detected = False
+                
                 if magnitude.shape[1] > 1 and self._prev_magnitude is not None:
                     # Spectral flux: changes in magnitude spectrum frame-to-frame
+                    # This is more reliable than simple amplitude thresholding
                     mag_diff = magnitude - self._prev_magnitude
                     flux = np.sqrt(np.sum(mag_diff ** 2, axis=0))
                     
                     if len(flux) > 1:
                         flux_mean = np.mean(flux)
                         flux_std = np.std(flux)
-                        flux_threshold = flux_mean + (flux_std * 2.5)
-                        onset_detected = bool(np.any(flux > flux_threshold))
+                        
+                        # Onset threshold: 2.5x std above mean
+                        onset_threshold = flux_mean + (flux_std * 2.5)
+                        onset_detected = bool(np.any(flux > onset_threshold))
+                        
+                        # Beat detection: strong spectral flux (onset) + energy above baseline
+                        # Peaks in flux with high energy = percussive beat
+                        if np.any(flux > onset_threshold) and overall_amplitude > rms * 1.3:
+                            max_flux = float(np.max(flux))
+                            beat_confidence = min(1.0, (max_flux / flux_mean - 1.0) / 5.0)
+                            beat_detected = beat_confidence > 0.3  # Only beats with >30% confidence
                     else:
                         onset_detected = False
                 else:
-                    onset_detected = False
+                    # Fallback to amplitude-based beat detection if STFT unavailable
+                    mono_env = np.abs(mono)
+                    env_rms = np.sqrt(np.mean(mono_env ** 2))
+                    beat_threshold = env_rms * 1.5
+                    beat_detected = overall_amplitude > beat_threshold
+                    
+                    if beat_threshold > 1e-10:
+                        beat_confidence = min(1.0, (overall_amplitude / beat_threshold) / 3.0)
+                    else:
+                        beat_confidence = 0.0
             
-            # Cache magnitude for next frame's onset detection
+            # Cache magnitude for next frame's beat/onset detection
             self._prev_magnitude = magnitude.copy()
             self._prev_frame_energy = frame_energy.copy() if frame_energy is not None else None
             
@@ -360,6 +368,12 @@ class AudioProcessingWorker(QueuedWorker):
                             # Mono input needs to be duplicated to match expected 2-channel format
                             stereo_chunk = np.column_stack([item.samples, item.samples])
                             self.multi_analyzer.add_audio_chunk(stereo_chunk.astype(np.float32))
+                        
+                        # Record beat detection for tempo tracking
+                        # This feeds beat_detected events into slow_analyzer.beat_timestamps
+                        # which is used for BPM estimation
+                        if beat_detected:
+                            self.multi_analyzer.record_beat_detection(self.timestamp, beat_confidence)
                         
                         # Analyze all tiers periodically (every few chunks)
                         if self._chunk_counter % 4 == 0:  # Every ~4 chunks (~46ms)
