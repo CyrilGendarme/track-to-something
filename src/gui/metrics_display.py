@@ -41,6 +41,11 @@ class RealTimeMetricsDisplay(ttk.Frame):
         self.slow_features: Optional[SlowFeatures] = None
         self.lock = threading.Lock()
         
+        # Initialize widget references FIRST (before tab creation)
+        self.value_labels: dict[str, ttk.Label] = {}
+        self.progress_bars: dict[str, ttk.Progressbar] = {}
+        self.bool_indicators: dict[str, tk.Canvas] = {}
+        
         # Define all metrics to display
         self.metrics = {
             # FAST TIER (5-10ms)
@@ -80,11 +85,6 @@ class RealTimeMetricsDisplay(ttk.Frame):
             tab = self._create_tier_tab(tier)
             self.tabs[tier] = tab
             self.notebook.add(tab, text=tier.upper())
-        
-        # Widget references for updating
-        self.value_labels: dict[str, ttk.Label] = {}
-        self.progress_bars: dict[str, ttk.Progressbar] = {}
-        self.bool_indicators: dict[str, tk.Canvas] = {}
     
     def _create_tier_tab(self, tier: str) -> ttk.Frame:
         """Create a tab for displaying metrics from one tier.
