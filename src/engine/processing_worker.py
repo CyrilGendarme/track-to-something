@@ -149,7 +149,6 @@ class AudioProcessingWorker(QueuedWorker):
         self.n_fft = n_fft
         self.hop_length = hop_length
         self.sample_rate = DEFAULT_SAMPLE_RATE
-        self.timestamp = 0.0
         self.feature_cache = feature_cache
         
         # TIERED ANALYSIS: Track which analyses to skip on this chunk
@@ -171,7 +170,7 @@ class AudioProcessingWorker(QueuedWorker):
             logger.warning(f"[{name}] No shared multi_analyzer provided, creating own (beats won't be shared)")
         else:
             self.multi_analyzer = multi_analyzer
-            logger.debug(f"[{name}] Using shared MultiWindowAnalyzer for beat aggregation")
+            logger.debug(f"[{name}] Using shared MultiWindowAnalyzer with stream timestamps for beat aggregation")
 
     def _process_item(self, item: AudioChunkMessage) -> None:
         """Analyze audio chunk with TIERED ANALYSIS strategy.
@@ -268,7 +267,7 @@ class AudioProcessingWorker(QueuedWorker):
                             max_flux = float(np.max(flux))
                             beat_confidence = min(1.0, (max_flux / flux_mean - 1.0) / 5.0)
                             beat_detected = beat_confidence > 0.3  # Only beats with >30% confidence
-                            logger.info(f"[{self.name}] BEAT DETECTED @ {self.timestamp:.3f}s: confidence={beat_confidence:.2f}, amp={overall_amplitude:.3f}, rms={rms:.3f}, flux_max={max_flux:.3f}")
+                            logger.info(f"[{self.name}] BEAT DETECTED @ {item.timestamp_s:.3f}s: confidence={beat_confidence:.2f}, amp={overall_amplitude:.3f}, rms={rms:.3f}, flux_max={max_flux:.3f}")
                     else:
                         onset_detected = False
                 else:
@@ -284,7 +283,7 @@ class AudioProcessingWorker(QueuedWorker):
                         beat_confidence = 0.0
                     
                     if beat_detected:
-                        logger.info(f"[{self.name}] BEAT (FALLBACK) @ {self.timestamp:.3f}s: confidence={beat_confidence:.2f}, amp={overall_amplitude:.3f}")
+                        logger.info(f"[{self.name}] BEAT (FALLBACK) @ {item.timestamp_s:.3f}s: confidence={beat_confidence:.2f}, amp={overall_amplitude:.3f}")
             
             # Cache magnitude for next frame's beat/onset detection
             self._prev_magnitude = magnitude.copy()
@@ -386,19 +385,17 @@ class AudioProcessingWorker(QueuedWorker):
                         # This feeds beat_detected events into slow_analyzer.beat_timestamps
                         # which is used for BPM estimation
                         if beat_detected:
-                            self.multi_analyzer.record_beat_detection(self.timestamp, beat_confidence)
+                            self.multi_analyzer.record_beat_detection(item.timestamp_s, beat_confidence)
                         
                         # Analyze all tiers periodically (every few chunks)
                         if self._chunk_counter % 4 == 0:  # Every ~4 chunks (~46ms)
-                            fast_f, medium_f, slow_f = self.multi_analyzer.analyze_all(self.timestamp)
+                            fast_f, medium_f, slow_f = self.multi_analyzer.analyze_all(item.timestamp_s)
                             self.feature_cache.update(fast=fast_f, medium=medium_f, slow=slow_f)
                     except Exception as e:
                         logger.debug(f"[{self.name}] Error in tiered analysis: {e}")
             
             with perf.timing_context("process:queue_put"):
                 self.output_queue.put(features)
-            
-            self.timestamp += len(mono) / self.sample_rate
             
             # Log timing every 100 chunks
             if not hasattr(self, '_chunk_count'):

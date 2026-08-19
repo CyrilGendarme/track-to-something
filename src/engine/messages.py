@@ -12,6 +12,7 @@ class AudioChunkMessage:
     """Message containing audio chunk data."""
     samples: np.ndarray  # Shape (n_samples, n_channels) in float32
     sample_rate: int
+    timestamp_s: float  # When this chunk was captured (in seconds from stream start)
 
 
 @dataclass

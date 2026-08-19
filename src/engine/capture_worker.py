@@ -47,6 +47,7 @@ class AudioCaptureWorker(Worker):
         self.buffer = buffer
         self.chunk_count = 0
         self.sample_rate = sample_rate
+        self.stream_timestamp_s = 0.0  # Track cumulative stream time for shared timestamp
         
         # Initialize high-pass filter (20 Hz cutoff) if needed
         self._hpf_b = None
@@ -167,7 +168,15 @@ class AudioCaptureWorker(Worker):
                 
                 # Send to processing
                 with perf.timing_context("capture:queue_put"):
-                    msg = AudioChunkMessage(samples=samples, sample_rate=int(chunk.sample_rate))
+                    # Calculate stream timestamp: cumulative time based on samples processed
+                    chunk_timestamp = self.stream_timestamp_s
+                    self.stream_timestamp_s += len(samples) / int(chunk.sample_rate)
+                    
+                    msg = AudioChunkMessage(
+                        samples=samples,
+                        sample_rate=int(chunk.sample_rate),
+                        timestamp_s=chunk_timestamp
+                    )
                     self.output_queue.put(msg)
                 
                 self.chunk_count += 1
