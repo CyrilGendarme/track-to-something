@@ -22,6 +22,7 @@ from .settings import (
     MEDIUM_WINDOW_MS,
     SLOW_WINDOW_MS,
     BEAT_HISTORY_SIZE,
+    TONALITY_HISTORY_SIZE,
     # Tiered analysis decimation
     SPECTRAL_ANALYSIS_DECIMATION,
     TEMPO_ANALYSIS_DECIMATION,

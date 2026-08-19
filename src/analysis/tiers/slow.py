@@ -11,6 +11,7 @@ from src.config import (
     DEFAULT_SAMPLE_RATE,
     SLOW_WINDOW_MS,
     BEAT_HISTORY_SIZE,
+    TONALITY_HISTORY_SIZE,
     FREQ_BAND_BASS_MAX,
     FREQ_BAND_BASS_MIN,
     FREQ_BAND_MID_MIN,
@@ -62,6 +63,10 @@ class SlowAnalyzer:
         # Spectral history for tonality detection
         self.spectral_history = []
         self.max_spectral_history = 50  # ~500ms at 10 chunks/sec
+        
+        # Tonality smoothing - keep last N detected keys for voting
+        self.key_history = []  # List of (key_name, confidence) tuples
+        self.max_key_history = TONALITY_HISTORY_SIZE  # Configurable smoothing window
         
         # Musical key templates (major and minor key profiles)
         # Based on pitch class chroma distribution
@@ -178,6 +183,44 @@ class SlowAnalyzer:
         except Exception as e:
             logger.debug(f"Key detection error: {e}")
             return None, 0.0
+    
+    def _smooth_tonality(self, detected_key: str | None, confidence: float) -> tuple[str | None, float]:
+        """Smooth tonality detection using history voting.
+        
+        Keep last 10-15 detected keys and return the most common one for stability.
+        
+        Args:
+            detected_key: Newly detected key (or None)
+            confidence: Detection confidence (0-1)
+            
+        Returns:
+            Tuple of (smoothed_key, smoothed_confidence)
+        """
+        # Add to history
+        if detected_key is not None:
+            self.key_history.append((detected_key, confidence))
+        
+        # Keep only recent entries
+        if len(self.key_history) > self.max_key_history:
+            self.key_history.pop(0)
+        
+        # Not enough data yet
+        if len(self.key_history) < 3:
+            return detected_key, confidence
+        
+        # Vote: find most common key in history
+        key_counts = {}
+        for key, conf in self.key_history:
+            key_counts[key] = key_counts.get(key, 0) + 1
+        
+        # Most common key
+        smoothed_key = max(key_counts, key=key_counts.get)
+        
+        # Average confidence of the smoothed key
+        smoothed_confidences = [conf for key, conf in self.key_history if key == smoothed_key]
+        smoothed_confidence = float(np.mean(smoothed_confidences)) if smoothed_confidences else 0.0
+        
+        return smoothed_key, smoothed_confidence
     
     def update_metrics(self, overall_amplitude: float, rms: float, 
                       bass_energy: float, mid_energy: float, high_energy: float,
@@ -313,6 +356,9 @@ class SlowAnalyzer:
             detected_key, key_confidence = self._detect_key(audio_mono)
         else:
             detected_key, key_confidence = self._detect_key(audio_mono)
+        
+        # Smooth tonality using history voting (keep last 12 detections)
+        detected_key, key_confidence = self._smooth_tonality(detected_key, key_confidence)
         
         # ════════════════════════════════════════════════════════════════════
         # ENERGY TRACKING - for trend and variance

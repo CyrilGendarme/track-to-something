@@ -18,14 +18,14 @@ from typing import Final
 # Bass-heavy / Electronic Music (recommended for you?) -> 22050
 # 2️Balanced (vocals, acoustic) -> 32000
 #  Full fidelity (classical, orchestral) -> 44100
-DEFAULT_SAMPLE_RATE: Final[int] = int(os.getenv("MOSHPRO_SAMPLE_RATE", "22050"))
+# Increased to 44100 for better frequency resolution and tonality detection
+DEFAULT_SAMPLE_RATE: Final[int] = int(os.getenv("MOSHPRO_SAMPLE_RATE", "44100"))
 
 # Audio chunk size for capture workers (samples per chunk)
 # Affects latency (smaller = lower latency, higher CPU)
 # ~2048 samples @ 44.1kHz = ~46ms capture latency
-# A lower DEFAULT_SAMPLE_RATE allows for smaller chunk sizes without increasing CPU load.
-# ~256 samples @ 22.05kHz = ~11.6ms capture latency
-AUDIO_CHUNK_SIZE: Final[int] = int(os.getenv("MOSHPRO_CHUNK_SIZE", "256"))
+# Increased sample rate to 44100 Hz, chunk size adjusted for ~23ms latency
+AUDIO_CHUNK_SIZE: Final[int] = int(os.getenv("MOSHPRO_CHUNK_SIZE", "1024"))
 
 # ────────────────────────────────────────────────────────────────────────────
 # AUDIO QUALITY REDUCTION (for lightweight analysis)
@@ -74,15 +74,21 @@ FAST_WINDOW_MS: Final[float] = float(os.getenv("MOSHPRO_FAST_WINDOW_MS", "10.0")
 MEDIUM_WINDOW_MS: Final[float] = float(os.getenv("MOSHPRO_MEDIUM_WINDOW_MS", "32.0"))
 
 # Slow analyzer window (for overall metrics)
-# Latency: 50-150ms (reduced from 250ms for video sync responsiveness)
+# Latency: ~150ms (increased from 100ms for better tonality/tempo stability)
 # Use for: Tempo tracking, scene changes, stability metrics
-# Note: 250ms lag is perceptible on screen; video effects need <100ms
-SLOW_WINDOW_MS: Final[float] = float(os.getenv("MOSHPRO_SLOW_WINDOW_MS", "100.0"))
+# More history helps tonality detection converge to true key without jitter
+SLOW_WINDOW_MS: Final[float] = float(os.getenv("MOSHPRO_SLOW_WINDOW_MS", "150.0"))
 
 # Max beat history for tempo/BPM estimation
 # More history = more stable tempo but slower adaptation
-# Reduced from 10 to 6: video effects need quick tempo adaptation over perfect stability
-BEAT_HISTORY_SIZE: Final[int] = int(os.getenv("MOSHPRO_BEAT_HISTORY_SIZE", "6"))
+# Increased to 10: CPU is good, need stable tempo for accurate tonality detection
+BEAT_HISTORY_SIZE: Final[int] = int(os.getenv("MOSHPRO_BEAT_HISTORY_SIZE", "10"))
+
+# Tonality detection history size (number of detected keys to smooth)
+# Higher = more stable but slower to adapt to key changes
+# 12 detected keys = ~500-700ms of smoothing at 20Hz update rate
+# Best range: 10-15 for music with stable keys
+TONALITY_HISTORY_SIZE: Final[int] = int(os.getenv("MOSHPRO_TONALITY_HISTORY_SIZE", "12"))
 
 # ────────────────────────────────────────────────────────────────────────────
 # ANALYSIS TIER DECIMATION FACTORS
@@ -93,29 +99,30 @@ BEAT_HISTORY_SIZE: Final[int] = int(os.getenv("MOSHPRO_BEAT_HISTORY_SIZE", "6"))
 # SLOW (every 8+ chunks): tempo estimation → ~300-700ms
 
 # Spectral analysis (STFT, centroid, frequency bands) every N chunks
-# Reduced from 4 to 2: run STFT every 2 chunks (~23ms latency) for snappy video response
-# Trade: ~50% higher CPU for STFT, but lighting effects sync better to music transients
-SPECTRAL_ANALYSIS_DECIMATION: Final[int] = int(os.getenv("MOSHPRO_SPECTRAL_DECIMATION", "2"))
+# Set to 1: run STFT on every chunk for maximum tonality accuracy
+# CPU cost is acceptable; better key detection is worth it
+SPECTRAL_ANALYSIS_DECIMATION: Final[int] = int(os.getenv("MOSHPRO_SPECTRAL_DECIMATION", "1"))
 
 # Tempo estimation every N chunks (avoid constantly recalculating BPM)
-# Default: 8 = run every 8 chunks (~370ms latency, stable estimation)
-TEMPO_ANALYSIS_DECIMATION: Final[int] = int(os.getenv("MOSHPRO_TEMPO_DECIMATION", "8"))
+# Set to 4: run every 4 chunks for more frequent tempo/key analysis
+# Better tonality smoothing with more frequent updates
+TEMPO_ANALYSIS_DECIMATION: Final[int] = int(os.getenv("MOSHPRO_TEMPO_DECIMATION", "4"))
 
 # ────────────────────────────────────────────────────────────────────────────
 # SPECTRAL ANALYSIS (STFT)
 # ────────────────────────────────────────────────────────────────────────────
 
 # STFT FFT size (number of points)
-# Reduced from 1024 to 512 for 2x faster FFT computation
-# 512 @ 22.05kHz = ~23ms, 86Hz per bin (sufficient for electronic music bass/mid/high bands)
-# Trade: Less frequency detail (86 Hz/bin vs 43 Hz/bin) for 30% faster STFT
-STFT_FFT_SIZE: Final[int] = int(os.getenv("MOSHPRO_STFT_FFT_SIZE", "512"))
+# Increased to 1024 for better frequency resolution
+# 1024 @ 44.1kHz = ~23ms, 43Hz per bin (excellent for tonality detection and frequency bands)
+# Better frequency detail for accurate key detection with minimal latency cost
+STFT_FFT_SIZE: Final[int] = int(os.getenv("MOSHPRO_STFT_FFT_SIZE", "1024"))
 
 # STFT hop length (samples between frames)
-# Reduced from 512 to 256 to maintain 50% overlap with new FFT_SIZE=512
-# 256 @ 22.05kHz = 11.6ms between STFT frames (same temporal resolution as before)
-# Ensures smooth spectral tracking without extra CPU cost from increased hop
-STFT_HOP_LENGTH: Final[int] = int(os.getenv("MOSHPRO_STFT_HOP_LENGTH", "256"))
+# Set to 512 (50% overlap with new FFT_SIZE=1024)
+# 512 @ 44.1kHz = ~11.6ms between STFT frames (same temporal resolution)
+# Maintains smooth spectral tracking with better frequency detail
+STFT_HOP_LENGTH: Final[int] = int(os.getenv("MOSHPRO_STFT_HOP_LENGTH", "512"))
 
 # STFT window function
 STFT_WINDOW: Final[str] = os.getenv("MOSHPRO_STFT_WINDOW", "hann")
@@ -133,10 +140,10 @@ FREQ_BAND_MID_MIN: Final[float] = 250.0
 FREQ_BAND_MID_MAX: Final[float] = 4000.0
 
 # High frequency band (Hz)
-# Changed from 20000 to 11000: Nyquist frequency @ 22050 Hz is 11025 Hz (max analyzable)
-# Audio above 11025 Hz doesn't exist in signal; capped at 11000 for safety
+# Restored to 20000: With sample rate @ 44100 Hz, Nyquist is 22050 Hz
+# Full frequency range available for accurate analysis
 FREQ_BAND_HIGH_MIN: Final[float] = 4000.0
-FREQ_BAND_HIGH_MAX: Final[float] = 11000.0
+FREQ_BAND_HIGH_MAX: Final[float] = 20000.0
 
 # ────────────────────────────────────────────────────────────────────────────
 # PIPELINE THREADING
@@ -176,6 +183,15 @@ BEAT_CONFIDENCE_THRESHOLD: Final[float] = float(
 # Silence threshold (0-1 normalized energy)
 # Energy below this is considered silence
 SILENCE_THRESHOLD: Final[float] = float(os.getenv("MOSHPRO_SILENCE_THRESHOLD", "0.1"))
+
+# ────────────────────────────────────────────────────────────────────────────
+# TONALITY ANALYSIS (Musical Key Detection)
+# ────────────────────────────────────────────────────────────────────────────
+
+# Number of previous tonality detections to keep for smoothing
+# Higher = more stable key (less jitter) but slower response to key changes
+# Default 15 = ~0.5-1s of history (with ~30-40ms analysis updates)
+TONALITY_HISTORY_SIZE: Final[int] = int(os.getenv("MOSHPRO_TONALITY_HISTORY_SIZE", "15"))
 
 # ────────────────────────────────────────────────────────────────────────────
 # LOGGING & DEBUG
