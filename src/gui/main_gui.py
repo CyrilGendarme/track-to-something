@@ -7,7 +7,6 @@ from tkinter import ttk
 import logging
 from threading import Thread
 from typing import Optional, Callable
-from queue import Empty
 
 from src.config import DEFAULT_SAMPLE_RATE, FREQ_BAND_BASS_MIN, FREQ_BAND_BASS_MAX, FREQ_BAND_HIGH_MAX
 from src.engine import AudioPipeline, get_performance_monitor
@@ -71,7 +70,7 @@ class FrequencyRangeSelector(ttk.Frame):
         self.max_scale = ttk.Scale(
             max_frame,
             from_=100,
-            to=20000,
+            to=11000,
             variable=self.max_var,
             orient=tk.HORIZONTAL,
             command=self._on_max_change,
@@ -507,41 +506,13 @@ class AudioAnalysisGUI(tk.Tk):
     def _update_metrics_display(self) -> None:
         """Periodically update metrics display with latest features from pipeline."""
         if self.pipeline and self.pipeline.is_running():
-            # Try to extract latest features from processing queue
-            # We extract them from the features queue without blocking
-            try:
-                # Get latest features message (try multiple times to get the most recent)
-                latest_msg = None
-                while True:
-                    try:
-                        msg = self.pipeline.features_queue.get_nowait()
-                        latest_msg = msg
-                    except Empty:
-                        break
-                
-                # Extract tiered features from AudioFeaturesMessage
-                if latest_msg:
-                    # For now, create basic feature objects from the message data
-                    # In a full implementation, these would be extracted directly from analyzers
-                    self.last_fast_features = FastFeatures(
-                        timestamp_s=latest_msg.timestamp_s,
-                        onset_detected=latest_msg.onset_detected,
-                        onset_strength=0.0,  # Not in message
-                        is_percussive_peak=False,
-                        percussive_peak_strength=latest_msg.peak,
-                        raw_energy=latest_msg.rms,
-                    )
-                    self.last_medium_features = MediumFeatures(
-                        timestamp_s=latest_msg.timestamp_s,
-                        bass_energy=latest_msg.bass_energy,
-                        mid_energy=latest_msg.mid_energy,
-                        high_energy=latest_msg.high_energy,
-                        bass_energy_delta=0.0,
-                        overall_energy_delta=0.0,
-                    )
-                    # Note: Slow features would need to come from the slow analyzer
-            except Exception as e:
-                logger.debug(f"Error extracting features: {e}")
+            # Get latest features from pipeline cache (thread-safe)
+            fast, medium, slow = self.pipeline.feature_cache.get_all()
+            
+            if fast or medium or slow:
+                self.last_fast_features = fast
+                self.last_medium_features = medium
+                self.last_slow_features = slow
         
         # Update the metrics display
         self.metrics_display.update_features(

@@ -128,6 +128,7 @@ class AudioProcessingWorker(QueuedWorker):
         output_queue: Queue,
         n_fft: int = STFT_FFT_SIZE,
         hop_length: int = STFT_HOP_LENGTH,
+        feature_cache: "FeatureCache | None" = None,
         daemon: bool = False,
     ):
         """Initialize audio processing worker.
@@ -138,6 +139,7 @@ class AudioProcessingWorker(QueuedWorker):
             output_queue: Queue to send AudioFeaturesMessage to
             n_fft: FFT size for analysis (default from config)
             hop_length: Hop length for STFT (default from config)
+            feature_cache: Optional FeatureCache for storing tiered features for GUI
             daemon: If True, thread will not prevent program exit
         """
         super().__init__(name=name, input_queue=input_queue, daemon=daemon)
@@ -146,6 +148,7 @@ class AudioProcessingWorker(QueuedWorker):
         self.hop_length = hop_length
         self.sample_rate = DEFAULT_SAMPLE_RATE
         self.timestamp = 0.0
+        self.feature_cache = feature_cache
         
         # TIERED ANALYSIS: Track which analyses to skip on this chunk
         self._chunk_counter = 0
@@ -156,6 +159,10 @@ class AudioProcessingWorker(QueuedWorker):
         # Cache spectral data between chunks for stability
         self._prev_magnitude: np.ndarray | None = None
         self._prev_frame_energy: np.ndarray | None = None
+        
+        # Multi-window analyzer for complete tiered analysis
+        from src.analysis import MultiWindowAudioAnalyzer
+        self.multi_analyzer = MultiWindowAudioAnalyzer(sample_rate=DEFAULT_SAMPLE_RATE)
 
     def _process_item(self, item: AudioChunkMessage) -> None:
         """Analyze audio chunk with TIERED ANALYSIS strategy.
@@ -341,6 +348,25 @@ class AudioProcessingWorker(QueuedWorker):
                 band_mid_envelope=band_mid_envelope,
                 band_high_envelope=band_high_envelope,
             )
+            
+            # Update multi-window analyzer with current audio and store tiered features for GUI
+            if self.feature_cache and self.multi_analyzer:
+                with perf.timing_context("process:tiered_analysis"):
+                    try:
+                        # Feed audio to the analyzer
+                        if item.samples.ndim == 2:
+                            self.multi_analyzer.add_audio_chunk(item.samples.astype(np.float32))
+                        else:
+                            # Mono input needs to be duplicated to match expected 2-channel format
+                            stereo_chunk = np.column_stack([item.samples, item.samples])
+                            self.multi_analyzer.add_audio_chunk(stereo_chunk.astype(np.float32))
+                        
+                        # Analyze all tiers periodically (every few chunks)
+                        if self._chunk_counter % 4 == 0:  # Every ~4 chunks (~46ms)
+                            fast_f, medium_f, slow_f = self.multi_analyzer.analyze_all(self.timestamp)
+                            self.feature_cache.update(fast=fast_f, medium=medium_f, slow=slow_f)
+                    except Exception as e:
+                        logger.debug(f"[{self.name}] Error in tiered analysis: {e}")
             
             with perf.timing_context("process:queue_put"):
                 self.output_queue.put(features)

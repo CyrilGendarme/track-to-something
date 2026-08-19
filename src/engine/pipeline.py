@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+import threading
 from queue import Queue
-from typing import Callable
+from typing import Callable, Optional
 
 from src.config import (
     DEFAULT_SAMPLE_RATE,
@@ -12,6 +13,7 @@ from src.config import (
     NUM_PROCESSING_WORKERS,
     OUTPUT_QUEUE_MAXSIZE,
 )
+from src.analysis.tiers.features import FastFeatures, MediumFeatures, SlowFeatures
 from .buffer import CircularAudioBuffer
 from .capture_worker import AudioCaptureWorker
 from .processing_worker import AudioProcessingWorker
@@ -19,6 +21,42 @@ from .analysis_worker import AnalysisWorker
 from .rendering_worker import RenderingWorker
 
 logger = logging.getLogger(__name__)
+
+
+class FeatureCache:
+    """Thread-safe cache for latest audio features (all three tiers)."""
+    
+    def __init__(self):
+        """Initialize feature cache."""
+        self.fast: Optional[FastFeatures] = None
+        self.medium: Optional[MediumFeatures] = None
+        self.slow: Optional[SlowFeatures] = None
+        self.lock = threading.Lock()
+    
+    def update(self, fast: Optional[FastFeatures] = None, medium: Optional[MediumFeatures] = None, slow: Optional[SlowFeatures] = None) -> None:
+        """Update cached features.
+        
+        Args:
+            fast: FastFeatures or None
+            medium: MediumFeatures or None
+            slow: SlowFeatures or None
+        """
+        with self.lock:
+            if fast is not None:
+                self.fast = fast
+            if medium is not None:
+                self.medium = medium
+            if slow is not None:
+                self.slow = slow
+    
+    def get_all(self) -> tuple[Optional[FastFeatures], Optional[MediumFeatures], Optional[SlowFeatures]]:
+        """Get all cached features.
+        
+        Returns:
+            Tuple of (fast, medium, slow) features
+        """
+        with self.lock:
+            return self.fast, self.medium, self.slow
 
 
 class AudioPipeline:
@@ -60,6 +98,9 @@ class AudioPipeline:
         # Shared circular buffer
         self.audio_buffer = CircularAudioBuffer(capacity_s=buffer_capacity_s, sample_rate=sample_rate)
         
+        # Feature cache for GUI access (thread-safe)
+        self.feature_cache = FeatureCache()
+        
         # Worker threads
         self.capture_worker = AudioCaptureWorker(
             "Capture",
@@ -74,6 +115,7 @@ class AudioPipeline:
                 f"Processing-{i}",
                 input_queue=self.capture_queue,
                 output_queue=self.features_queue,
+                feature_cache=self.feature_cache,
                 daemon=True,
             )
             for i in range(n_processing_workers)
