@@ -71,7 +71,7 @@ class FrequencyRangeSelector(ttk.Frame):
         self.max_scale = ttk.Scale(
             max_frame,
             from_=100,
-            to=11000,
+            to=20000,
             variable=self.max_var,
             orient=tk.HORIZONTAL,
             command=self._on_max_change,
