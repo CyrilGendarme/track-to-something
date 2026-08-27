@@ -20,15 +20,33 @@ import dataclasses
 import json
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from aiohttp import web
 
 from src.analysis.bpm_detectors import consensus_bpm
-from src.config import API_BROADCAST_INTERVAL_S, API_HOST, API_PORT
+from src.config import API_HOST, API_PORT
 from src.engine.pipeline import FeatureCache
 
 logger = logging.getLogger(__name__)
+
+
+class JSONEncoder(json.JSONEncoder):
+    """Custom JSON encoder that handles numpy and other non-standard types."""
+    
+    def default(self, obj: Any) -> Any:
+        """Convert non-standard types to JSON-serializable forms."""
+        # Handle numpy types
+        if hasattr(obj, "item"):  # numpy scalars
+            return obj.item()
+        if isinstance(obj, (bool, int, float, str, type(None))):
+            return obj
+        if isinstance(obj, (list, tuple)):
+            return [self.default(item) for item in obj]
+        if isinstance(obj, dict):
+            return {k: self.default(v) for k, v in obj.items()}
+        return str(obj)
 
 
 def _feature_snapshot(feature_cache: FeatureCache) -> dict[str, Any]:
@@ -72,6 +90,9 @@ class AnalysisAPIServer:
         self._websockets: set[web.WebSocketResponse] = set()
         self._ready = threading.Event()
         self._start_error: Exception | None = None
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="AnalysisAPIServer-IO")
+        self._shutdown_event: asyncio.Event | None = None
+        self._broadcast_queue: asyncio.Queue[None] | None = None
 
     @property
     def is_running(self) -> bool:
@@ -114,6 +135,8 @@ class AnalysisAPIServer:
         self._loop.run_forever()
 
     async def _start_server(self) -> None:
+        self._shutdown_event = asyncio.Event()  # Create with current event loop
+        self._broadcast_queue = asyncio.Queue()  # Event-driven broadcast signaling
         app = web.Application(middlewares=[_cors_middleware])
         app.router.add_get("/health", self._handle_health)
         app.router.add_get("/features", self._handle_features)
@@ -126,16 +149,23 @@ class AnalysisAPIServer:
         await self._runner.setup()
         site = web.TCPSite(self._runner, self.host, self.port)
         await site.start()
+        # Register event-driven callback: when features update, signal broadcast
+        self.feature_cache.set_update_callback(self._on_features_updated)
         asyncio.ensure_future(self._broadcast_loop())
-        logger.info(f"[AnalysisAPIServer] Listening on http://{self.host}:{self.port}")
+        logger.info(f"[AnalysisAPIServer] Listening on http://{self.host}:{self.port} (event-driven WebSocket)")
 
     async def _shutdown(self) -> None:
+        # Unregister callback before shutting down
+        self.feature_cache.set_update_callback(None)
+        if self._shutdown_event is not None:
+            self._shutdown_event.set()  # Signal broadcast loop to stop
         for ws in list(self._websockets):
             await ws.close()
         self._websockets.clear()
         if self._runner is not None:
             await self._runner.cleanup()
             self._runner = None
+        # Executor will be cleaned up when the event loop closes
 
     async def _handle_health(self, request: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
@@ -176,16 +206,68 @@ class AnalysisAPIServer:
             logger.debug(f"[AnalysisAPIServer] WebSocket client disconnected ({len(self._websockets)} total)")
         return ws
 
+    def _on_features_updated(self) -> None:
+        """Callback invoked by FeatureCache when features are updated.
+        
+        Signals the broadcast loop to send updates to WebSocket clients immediately.
+        This is called from the audio processing thread, so we queue the signal
+        to be processed asynchronously in the event loop.
+        """
+        if self._loop is not None:
+            # Queue a signal to the broadcast loop (thread-safe)
+            asyncio.run_coroutine_threadsafe(
+                self._broadcast_queue.put(None),
+                self._loop
+            )
+
     async def _broadcast_loop(self) -> None:
-        while True:
-            await asyncio.sleep(API_BROADCAST_INTERVAL_S)
-            if not self._websockets:
-                continue
-            payload = json.dumps(_feature_snapshot(self.feature_cache))
-            dead: set[web.WebSocketResponse] = set()
-            for ws in list(self._websockets):
+        """Event-driven broadcast loop: sends updates to WebSocket clients immediately when data changes.
+        
+        Waits on an asyncio.Queue that is signaled by _on_features_updated() whenever
+        the feature cache is updated. This replaces the interval-based polling approach
+        with true event-driven architecture for zero-latency updates.
+        """
+        logger.info("[AnalysisAPIServer] Event-driven broadcast loop started")
+        try:
+            while self._shutdown_event is None or not self._shutdown_event.is_set():
                 try:
-                    await ws.send_str(payload)
-                except (ConnectionResetError, RuntimeError):
-                    dead.add(ws)
-            self._websockets -= dead
+                    # Wait for a signal (or timeout if no clients)
+                    # Using a short timeout to allow shutdown checks even if no updates arrive
+                    await asyncio.wait_for(
+                        self._broadcast_queue.get(),
+                        timeout=1.0
+                    )
+                except asyncio.TimeoutError:
+                    # Timeout is normal; just continue waiting
+                    continue
+                
+                if self._shutdown_event is not None and self._shutdown_event.is_set():
+                    break
+                
+                if not self._websockets:
+                    # No clients connected; skip broadcasting
+                    continue
+                
+                try:
+                    # Use thread pool to avoid blocking the event loop when acquiring feature_cache lock
+                    loop = asyncio.get_event_loop()
+                    payload = await loop.run_in_executor(
+                        self._executor,
+                        lambda: json.dumps(_feature_snapshot(self.feature_cache), cls=JSONEncoder)
+                    )
+                    
+                    # Broadcast to all connected WebSocket clients
+                    dead: set[web.WebSocketResponse] = set()
+                    for ws in list(self._websockets):
+                        try:
+                            await ws.send_str(payload)
+                        except Exception as e:  # noqa: BLE001
+                            logger.debug(f"[AnalysisAPIServer] Failed to send to WebSocket: {type(e).__name__}: {e}")
+                            dead.add(ws)
+                    self._websockets -= dead
+                except Exception as e:  # noqa: BLE001
+                    logger.error(f"[AnalysisAPIServer] Broadcast error: {type(e).__name__}: {e}", exc_info=True)
+        except asyncio.CancelledError:
+            logger.debug("[AnalysisAPIServer] Broadcast loop cancelled")
+        finally:
+            logger.info("[AnalysisAPIServer] Broadcast loop stopped")

@@ -27,7 +27,11 @@ logger = logging.getLogger(__name__)
 
 
 class FeatureCache:
-    """Thread-safe cache for latest audio features (all three tiers)."""
+    """Thread-safe cache for latest audio features (all three tiers).
+    
+    Supports event-driven broadcasting: when features are updated, registered
+    callbacks are invoked immediately for real-time WebSocket push.
+    """
     
     def __init__(self):
         """Initialize feature cache."""
@@ -36,15 +40,29 @@ class FeatureCache:
         self.slow: Optional[SlowFeatures] = None
         self.bpm_estimates: dict[str, BPMEstimate] = {}
         self.lock = threading.Lock()
+        self._on_update_callback: Callable[[], None] | None = None
+    
+    def set_update_callback(self, callback: Callable[[], None] | None) -> None:
+        """Register a callback to be invoked when features are updated.
+        
+        Args:
+            callback: Callable with no arguments, or None to unregister
+        """
+        with self.lock:
+            self._on_update_callback = callback
     
     def update(self, fast: Optional[FastFeatures] = None, medium: Optional[MediumFeatures] = None, slow: Optional[SlowFeatures] = None) -> None:
         """Update cached features.
+        
+        When features are updated, the registered callback (if any) is invoked
+        to trigger immediate broadcast to WebSocket clients.
         
         Args:
             fast: FastFeatures or None
             medium: MediumFeatures or None
             slow: SlowFeatures or None
         """
+        callback_to_invoke = None
         with self.lock:
             if fast is not None:
                 self.fast = fast
@@ -52,6 +70,14 @@ class FeatureCache:
                 self.medium = medium
             if slow is not None:
                 self.slow = slow
+            callback_to_invoke = self._on_update_callback
+        
+        # Invoke callback outside the lock to avoid blocking the update
+        if callback_to_invoke is not None:
+            try:
+                callback_to_invoke()
+            except Exception as exc:  # noqa: BLE001
+                logger.error(f"[FeatureCache] Callback error: {type(exc).__name__}: {exc}", exc_info=True)
     
     def get_all(self) -> tuple[Optional[FastFeatures], Optional[MediumFeatures], Optional[SlowFeatures]]:
         """Get all cached features.

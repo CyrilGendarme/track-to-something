@@ -17,7 +17,7 @@ from src.engine import FeatureCache
 @pytest.fixture
 def api_server():
     cache = FeatureCache()
-    server = AnalysisAPIServer(cache, host="127.0.0.1", port=18765)
+    server = AnalysisAPIServer(cache, host="127.0.0.1", port=18768)
     server.start()
     yield server, cache
     server.stop()

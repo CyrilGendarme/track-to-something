@@ -219,10 +219,7 @@ DEBUG_ANALYSIS: Final[bool] = os.getenv("MOSHPRO_DEBUG_ANALYSIS", "").lower() ==
 API_HOST: Final[str] = os.getenv("MOSHPRO_API_HOST", "127.0.0.1")
 
 # Port for the local API server (HTTP GET endpoints + /ws WebSocket stream)
-API_PORT: Final[int] = int(os.getenv("MOSHPRO_API_PORT", "8765"))
-
-# How often the WebSocket endpoint broadcasts the latest snapshot (seconds)
-API_BROADCAST_INTERVAL_S: Final[float] = float(os.getenv("MOSHPRO_API_BROADCAST_INTERVAL_S", "0.1"))
+API_PORT: Final[int] = int(os.getenv("MOSHPRO_API_PORT", "8768"))
 
 
 # ────────────────────────────────────────────────────────────────────────────

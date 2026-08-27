@@ -51,7 +51,6 @@ from .settings import (
     # Local API
     API_HOST,
     API_PORT,
-    API_BROADCAST_INTERVAL_S,
 )
 
 __all__ = [
@@ -95,5 +94,4 @@ __all__ = [
     # Local API
     "API_HOST",
     "API_PORT",
-    "API_BROADCAST_INTERVAL_S",
 ]
