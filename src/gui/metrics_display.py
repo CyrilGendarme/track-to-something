@@ -17,14 +17,9 @@ logger = logging.getLogger(__name__)
 
 # Human-friendly labels for each BPM detector method (see src/analysis/bpm_detectors.py)
 BPM_METHOD_LABELS: dict[str, str] = {
-    "kick_band_autocorr": "Kick Band (40-120Hz) Autocorr",
     "dynamic_kick_band": "Dynamic Kick Band Autocorr",
     "comb_filter_bank": "Comb Filter Bank",
     "librosa_beat_track": "Librosa Beat Track",
-    "librosa_onset_tempogram": "Librosa Onset Tempogram",
-    "aubio_tempo": "Aubio Tempo",
-    "madmom_dbn": "Madmom DBN Beat Tracker",
-    "essentia_rhythm_extractor": "Essentia Rhythm Extractor",
 }
 
 

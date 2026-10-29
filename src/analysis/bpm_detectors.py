@@ -3,25 +3,17 @@
 The single onset-timestamp BPM estimator used elsewhere in this project
 (``SlowAnalyzer``/``BeatPredictor``) is very sensitive to missed or spurious
 onset detections, which causes large BPM jitter even on tracks with a very
-stable beat. This module implements several *independent* algorithms that
+stable beat. This module implements three *independent* algorithms that
 each estimate BPM directly from a raw audio window, so a single bad onset
 detection can no longer swing the result.
 
 Methods implemented:
-    - ``kick_band_autocorrelation``: band-pass the kick fundamental
-      (40-120 Hz), build an onset-strength envelope, autocorrelate it.
     - ``dynamic_kick_band``: find the dominant low-frequency peak per
       window (adaptive kick frequency) and narrow-band around it before
       autocorrelating - handles tracks whose kick isn't at a fixed pitch.
     - ``comb_filter_bank``: classic Scheirer-style comb filter bank scored
       directly against BPM candidates in-range (robust to octave errors).
     - ``librosa_beat_track``: librosa's dynamic-programming beat tracker.
-    - ``librosa_onset_tempogram``: librosa onset-strength + Fourier
-      tempogram, independent of the beat tracker's DP path.
-    - ``aubio_tempo``, ``madmom_dbn``, ``essentia_rhythm_extractor``:
-      optional third-party detectors, only available when the corresponding
-      package is installed. They degrade gracefully (``available=False``)
-      otherwise.
 
 All detectors share the same signature
 ``(waveform: np.ndarray, sample_rate: int, min_bpm: float, max_bpm: float) -> BPMEstimate``
@@ -47,30 +39,6 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MIN_BPM: float = 60.0
 DEFAULT_MAX_BPM: float = 200.0
-
-# ────────────────────────────────────────────────────────────────────────────
-# Optional third-party libraries - probed once at import time.
-# ────────────────────────────────────────────────────────────────────────────
-try:
-    import aubio  # type: ignore
-
-    AUBIO_AVAILABLE = True
-except ImportError:
-    AUBIO_AVAILABLE = False
-
-try:
-    import madmom  # type: ignore  # noqa: F401
-
-    MADMOM_AVAILABLE = True
-except ImportError:
-    MADMOM_AVAILABLE = False
-
-try:
-    import essentia.standard as essentia_standard  # type: ignore
-
-    ESSENTIA_AVAILABLE = True
-except ImportError:
-    ESSENTIA_AVAILABLE = False
 
 
 @dataclass(frozen=True)
@@ -186,31 +154,7 @@ def _autocorrelation_bpm(
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Idea 1: focus on the low range of frequencies to target the kick drum
-# ────────────────────────────────────────────────────────────────────────────
-def detect_kick_band_autocorrelation(
-    y: np.ndarray,
-    sr: int,
-    min_bpm: float = DEFAULT_MIN_BPM,
-    max_bpm: float = DEFAULT_MAX_BPM,
-    low_hz: float = 40.0,
-    high_hz: float = 120.0,
-) -> BPMEstimate:
-    """Band-pass the typical kick-drum fundamental range, then autocorrelate."""
-    method = "kick_band_autocorr"
-    try:
-        if y.size < sr * 2:
-            return BPMEstimate(method, None, 0.0, error="need >= 2s of audio")
-        filtered = _bandpass(y, sr, low_hz, high_hz)
-        envelope, envelope_rate = _onset_envelope(filtered, sr)
-        bpm, confidence = _autocorrelation_bpm(envelope, envelope_rate, min_bpm, max_bpm)
-        return BPMEstimate(method, bpm, confidence, extra={"band_low_hz": low_hz, "band_high_hz": high_hz})
-    except Exception as exc:  # noqa: BLE001 - report per-method failures
-        return BPMEstimate(method, None, 0.0, error=str(exc))
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# Idea 2: dynamically find the regular low-frequency peak (adaptive kick band)
+# Dynamically find the regular low-frequency peak (adaptive kick band)
 # ────────────────────────────────────────────────────────────────────────────
 def detect_dynamic_kick_band(
     y: np.ndarray,
@@ -261,7 +205,7 @@ def detect_dynamic_kick_band(
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Idea 3: Scheirer-style comb filter bank, scored directly against candidates
+# Scheirer-style comb filter bank, scored directly against candidates
 # ────────────────────────────────────────────────────────────────────────────
 def detect_comb_filter_bank(
     y: np.ndarray,
@@ -312,7 +256,7 @@ def detect_comb_filter_bank(
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Idea 4: librosa dynamic-programming beat tracker
+# Librosa dynamic-programming beat tracker
 # ────────────────────────────────────────────────────────────────────────────
 def detect_librosa_beat_track(
     y: np.ndarray,
@@ -345,152 +289,12 @@ def detect_librosa_beat_track(
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Idea 5: librosa onset-strength + Fourier tempogram (independent of DP path)
-# ────────────────────────────────────────────────────────────────────────────
-def detect_librosa_onset_tempogram(
-    y: np.ndarray,
-    sr: int,
-    min_bpm: float = DEFAULT_MIN_BPM,
-    max_bpm: float = DEFAULT_MAX_BPM,
-) -> BPMEstimate:
-    """Librosa onset-strength envelope + tempogram, aggregated over time."""
-    method = "librosa_onset_tempogram"
-    try:
-        if y.size < sr * 2:
-            return BPMEstimate(method, None, 0.0, error="need >= 2s of audio")
-        hop_length = 512
-        onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop_length)
-        tempogram = librosa.feature.tempogram(onset_envelope=onset_env, sr=sr, hop_length=hop_length)
-        tempo_frequencies = librosa.tempo_frequencies(tempogram.shape[0], sr=sr, hop_length=hop_length)
-
-        mean_tempogram = tempogram.mean(axis=1)
-        mask = (tempo_frequencies >= min_bpm) & (tempo_frequencies <= max_bpm)
-        if not np.any(mask):
-            return BPMEstimate(method, None, 0.0, error="no candidates in BPM range")
-
-        candidate_bpms = tempo_frequencies[mask]
-        candidate_scores = mean_tempogram[mask]
-        best_idx = int(np.argmax(candidate_scores))
-        best_bpm = float(candidate_bpms[best_idx])
-        max_score = float(np.max(mean_tempogram)) + 1e-9
-        confidence = float(max(0.0, min(1.0, candidate_scores[best_idx] / max_score)))
-        return BPMEstimate(method, best_bpm, confidence)
-    except Exception as exc:  # noqa: BLE001
-        return BPMEstimate(method, None, 0.0, error=str(exc))
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# Optional: aubio
-# ────────────────────────────────────────────────────────────────────────────
-def detect_aubio_tempo(
-    y: np.ndarray,
-    sr: int,
-    min_bpm: float = DEFAULT_MIN_BPM,
-    max_bpm: float = DEFAULT_MAX_BPM,
-) -> BPMEstimate:
-    """aubio's onset-based tempo tracker (``aubio.tempo``)."""
-    method = "aubio_tempo"
-    if not AUBIO_AVAILABLE:
-        return BPMEstimate(method, None, 0.0, available=False, error="aubio not installed")
-    try:
-        win_s = 1024
-        hop_s = win_s // 4
-        tempo_o = aubio.tempo("default", win_s, hop_s, sr)
-        y32 = np.ascontiguousarray(y, dtype=np.float32)
-
-        beat_positions_s: list[float] = []
-        pos = 0
-        while pos + hop_s <= len(y32):
-            frame = y32[pos : pos + hop_s]
-            if tempo_o(frame):
-                beat_positions_s.append(tempo_o.get_last_s())
-            pos += hop_s
-
-        if len(beat_positions_s) < 2:
-            return BPMEstimate(method, None, 0.0, error="insufficient beats detected")
-
-        intervals = np.diff(beat_positions_s)
-        mean_interval = float(np.mean(intervals))
-        if mean_interval <= 0:
-            return BPMEstimate(method, None, 0.0, error="degenerate beat interval")
-        bpm = 60.0 / mean_interval
-        cv = float(np.std(intervals) / mean_interval)
-        confidence = max(0.0, min(1.0, 1.0 - cv))
-        return BPMEstimate(method, float(bpm), confidence, extra={"n_beats": float(len(beat_positions_s))})
-    except Exception as exc:  # noqa: BLE001
-        return BPMEstimate(method, None, 0.0, error=str(exc))
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# Optional: madmom
-# ────────────────────────────────────────────────────────────────────────────
-def detect_madmom_dbn(
-    y: np.ndarray,
-    sr: int,
-    min_bpm: float = DEFAULT_MIN_BPM,
-    max_bpm: float = DEFAULT_MAX_BPM,
-) -> BPMEstimate:
-    """madmom's RNN activation + DBN beat tracker (state-of-the-art, heavy)."""
-    method = "madmom_dbn"
-    if not MADMOM_AVAILABLE:
-        return BPMEstimate(method, None, 0.0, available=False, error="madmom not installed")
-    try:
-        from madmom.features.beats import DBNBeatTrackingProcessor, RNNBeatProcessor
-
-        activations = RNNBeatProcessor()(np.ascontiguousarray(y, dtype=np.float32))
-        proc = DBNBeatTrackingProcessor(min_bpm=min_bpm, max_bpm=max_bpm, fps=100)
-        beat_times = proc(activations)
-
-        if len(beat_times) < 2:
-            return BPMEstimate(method, None, 0.0, error="insufficient beats detected")
-
-        intervals = np.diff(beat_times)
-        mean_interval = float(np.mean(intervals))
-        if mean_interval <= 0:
-            return BPMEstimate(method, None, 0.0, error="degenerate beat interval")
-        bpm = 60.0 / mean_interval
-        cv = float(np.std(intervals) / mean_interval)
-        confidence = max(0.0, min(1.0, 1.0 - cv))
-        return BPMEstimate(method, float(bpm), confidence, extra={"n_beats": float(len(beat_times))})
-    except Exception as exc:  # noqa: BLE001
-        return BPMEstimate(method, None, 0.0, error=str(exc))
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# Optional: essentia
-# ────────────────────────────────────────────────────────────────────────────
-def detect_essentia_rhythm_extractor(
-    y: np.ndarray,
-    sr: int,
-    min_bpm: float = DEFAULT_MIN_BPM,
-    max_bpm: float = DEFAULT_MAX_BPM,
-) -> BPMEstimate:
-    """Essentia's multi-feature ``RhythmExtractor2013``."""
-    method = "essentia_rhythm_extractor"
-    if not ESSENTIA_AVAILABLE:
-        return BPMEstimate(method, None, 0.0, available=False, error="essentia not installed")
-    try:
-        extractor = essentia_standard.RhythmExtractor2013(method="multifeature")
-        bpm, beats, confidence, _, _ = extractor(np.ascontiguousarray(y, dtype=np.float32))
-        # essentia's multifeature confidence typically ranges ~0-5.32
-        normalized_confidence = float(max(0.0, min(1.0, confidence / 5.32)))
-        return BPMEstimate(method, float(bpm), normalized_confidence, extra={"n_beats": float(len(beats))})
-    except Exception as exc:  # noqa: BLE001
-        return BPMEstimate(method, None, 0.0, error=str(exc))
-
-
-# ────────────────────────────────────────────────────────────────────────────
 # Registry + parallel runner
 # ────────────────────────────────────────────────────────────────────────────
 _ALL_DETECTORS: dict[str, DetectorFn] = {
-    "kick_band_autocorr": detect_kick_band_autocorrelation,
     "dynamic_kick_band": detect_dynamic_kick_band,
     "comb_filter_bank": detect_comb_filter_bank,
     "librosa_beat_track": detect_librosa_beat_track,
-    "librosa_onset_tempogram": detect_librosa_onset_tempogram,
-    "aubio_tempo": detect_aubio_tempo,
-    "madmom_dbn": detect_madmom_dbn,
-    "essentia_rhythm_extractor": detect_essentia_rhythm_extractor,
 }
 
 

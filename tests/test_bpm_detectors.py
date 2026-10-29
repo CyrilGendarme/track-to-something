@@ -12,17 +12,12 @@ import numpy as np
 import pytest
 
 from src.analysis.bpm_detectors import (
-    AUBIO_AVAILABLE,
-    ESSENTIA_AVAILABLE,
-    MADMOM_AVAILABLE,
     BPMEstimate,
     MultiMethodBPMAnalyzer,
     consensus_bpm,
     detect_comb_filter_bank,
     detect_dynamic_kick_band,
-    detect_kick_band_autocorrelation,
     detect_librosa_beat_track,
-    detect_librosa_onset_tempogram,
 )
 
 SAMPLE_RATE = 22050
@@ -54,14 +49,6 @@ def _make_click_track(bpm: float, duration_s: float = 10.0, sr: int = SAMPLE_RAT
 
 
 @pytest.mark.parametrize("true_bpm", [100.0, 128.0, 174.0])
-def test_kick_band_autocorrelation_matches_known_bpm(true_bpm: float) -> None:
-    y = _make_click_track(true_bpm)
-    estimate = detect_kick_band_autocorrelation(y, SAMPLE_RATE)
-    assert estimate.bpm is not None, estimate.error
-    assert abs(estimate.bpm - true_bpm) < 2.0
-
-
-@pytest.mark.parametrize("true_bpm", [100.0, 128.0, 174.0])
 def test_dynamic_kick_band_matches_known_bpm(true_bpm: float) -> None:
     y = _make_click_track(true_bpm)
     estimate = detect_dynamic_kick_band(y, SAMPLE_RATE)
@@ -89,38 +76,14 @@ def test_librosa_beat_track_matches_known_bpm(true_bpm: float) -> None:
     assert closest_octave_error < 0.05
 
 
-@pytest.mark.parametrize("true_bpm", [100.0, 128.0, 174.0])
-def test_librosa_onset_tempogram_matches_known_bpm(true_bpm: float) -> None:
-    y = _make_click_track(true_bpm)
-    estimate = detect_librosa_onset_tempogram(y, SAMPLE_RATE)
-    assert estimate.bpm is not None, estimate.error
-    ratio = estimate.bpm / true_bpm
-    closest_octave_error = min(abs(ratio - 1.0), abs(ratio - 0.5), abs(ratio - 2.0))
-    assert closest_octave_error < 0.05
-
-
-def test_optional_detectors_report_unavailable_when_not_installed() -> None:
-    from src.analysis.bpm_detectors import detect_aubio_tempo, detect_essentia_rhythm_extractor, detect_madmom_dbn
-
-    y = _make_click_track(128.0, duration_s=3.0)
-    if not AUBIO_AVAILABLE:
-        estimate = detect_aubio_tempo(y, SAMPLE_RATE)
-        assert estimate.available is False
-    if not MADMOM_AVAILABLE:
-        estimate = detect_madmom_dbn(y, SAMPLE_RATE)
-        assert estimate.available is False
-    if not ESSENTIA_AVAILABLE:
-        estimate = detect_essentia_rhythm_extractor(y, SAMPLE_RATE)
-        assert estimate.available is False
-
-
 def test_multi_method_analyzer_runs_all_detectors_in_parallel() -> None:
     y = _make_click_track(128.0)
     analyzer = MultiMethodBPMAnalyzer()
     try:
         results = analyzer.analyze(y, SAMPLE_RATE)
-        assert "kick_band_autocorr" in results
+        assert "dynamic_kick_band" in results
         assert "librosa_beat_track" in results
+        assert "comb_filter_bank" in results
         assert all(name in results for name in analyzer.detectors)
     finally:
         analyzer.shutdown()
