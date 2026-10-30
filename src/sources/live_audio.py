@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from queue import Queue
+from queue import Empty, Queue
 from typing import Iterator
 
 import numpy as np
 import sounddevice as sd
 
-from src.config import DEFAULT_SAMPLE_RATE
+from src.config import AUDIO_BLOCK_SIZE, DEFAULT_SAMPLE_RATE
 from .audio_source import AudioChunk
 
 
@@ -16,7 +16,7 @@ class SoundDeviceSource:
     """Pull float32 blocks from an input or WASAPI loopback device."""
 
     def __init__(self, *, device: int | str, sample_rate: int = DEFAULT_SAMPLE_RATE,
-                 channels: int = 2, block_size: int = 4096, loopback: bool = False):
+                 channels: int = 2, block_size: int = AUDIO_BLOCK_SIZE, loopback: bool = False):
         self.device = device
         self.sample_rate = sample_rate
         self.channels = channels
@@ -27,49 +27,26 @@ class SoundDeviceSource:
         self._closed = False
 
     def _callback(self, indata, _frames, _time, _status) -> None:
+        # Runs on the PortAudio thread: copy and hand off, nothing else.
         self._chunks.put(indata.copy())
 
     def __iter__(self) -> Iterator[AudioChunk]:
-        if self.loopback:
-            yield from self._iter_loopback()
-            return
-
-        self._stream = sd.InputStream(device=self.device, samplerate=self.sample_rate,
+        device = self._find_loopback_device(sd) if self.loopback else self.device
+        self._stream = sd.InputStream(device=device, samplerate=self.sample_rate,
                                       channels=self.channels, blocksize=self.block_size,
                                       dtype="float32", callback=self._callback)
-        with self._stream:
-            while True:
-                samples = self._chunks.get()
-                if samples is None:
-                    break
-                yield AudioChunk(samples=samples, sample_rate=self.sample_rate)
-
-    def _iter_loopback(self) -> Iterator[AudioChunk]:
-        """Capture a Windows speaker loopback using sounddevice backend."""
-        import sounddevice as sd
-        
-        # Find the loopback device
-        loopback_device = self._find_loopback_device(sd)
-        
-        self._stream = sd.InputStream(
-            device=loopback_device,
-            samplerate=self.sample_rate,
-            channels=self.channels,
-            blocksize=self.block_size,
-            dtype="float32",
-            callback=self._callback,
-        )
+        # The stream is opened and closed by the iterating thread only; close()
+        # just wakes it up with a sentinel.
         with self._stream:
             while not self._closed:
                 try:
-                    samples = self._chunks.get(timeout=1.0)  # Timeout to check _closed flag
-                    if samples is None:
-                        break
-                    yield AudioChunk(samples=samples, sample_rate=self.sample_rate)
-                except Exception:
-                    # Timeout or empty queue, check if we should exit
-                    if self._closed:
-                        break
+                    samples = self._chunks.get(timeout=1.0)
+                except Empty:
+                    continue
+                if samples is None:
+                    break
+                yield AudioChunk(samples=samples, sample_rate=self.sample_rate)
+        self._stream = None
 
     def _find_loopback_device(self, sounddevice_module) -> int:
         """Find a Windows loopback/stereo mix device index."""
@@ -119,9 +96,8 @@ class SoundDeviceSource:
         )
 
     def close(self) -> None:
+        """Stop iteration. Safe to call more than once and from any thread."""
+        if self._closed:
+            return
         self._closed = True
-        if self._stream is not None:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
         self._chunks.put(None)

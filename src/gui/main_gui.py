@@ -5,11 +5,12 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 import logging
+import queue
 from threading import Thread
 from typing import Optional, Callable
 
-from src.config import DEFAULT_SAMPLE_RATE, FREQ_BAND_BASS_MIN, FREQ_BAND_BASS_MAX, FREQ_BAND_HIGH_MAX, API_HOST, API_PORT
-from src.engine import AudioPipeline, FeatureCache, get_performance_monitor
+from src.config import AUDIO_BLOCK_SIZE, JOBS_USE_PROCESSES, DEFAULT_SAMPLE_RATE, FREQ_BAND_BASS_MIN, FREQ_BAND_BASS_MAX, FREQ_BAND_HIGH_MAX, API_HOST, API_PORT
+from src.engine import AudioPipeline, FeatureCache, get_performance_monitor, prewarm_job_processes
 from src.sources import AudioInputSource, ApplicationAudioSource, AudioChunk
 from src.gui.theme import apply_theme, BG, BG_PANEL, BG_CARD, FG, FG_DIM, ACCENT, ACCENT2, FONT_UI, FONT_BOLD, FONT_TITLE
 from src.gui.audio_devices import get_available_audio_devices, get_running_applications, AudioDevice
@@ -483,6 +484,11 @@ class AudioAnalysisGUI(tk.Tk):
         self.pipeline_thread: Optional[Thread] = None
         self.selected_device: Optional[AudioDevice] = None
         
+        # Start the BPM/key worker processes now: their first-time startup
+        # (librosa import) then overlaps with the user picking a device.
+        if JOBS_USE_PROCESSES:
+            prewarm_job_processes()
+        
         # Persistent feature cache: outlives individual pipeline start/stop
         # cycles so the local API can keep serving the latest data regardless
         # of whether analysis is currently running.
@@ -495,12 +501,14 @@ class AudioAnalysisGUI(tk.Tk):
         self.last_slow_features: Optional[SlowFeatures] = None
         self.last_bpm_estimates: dict = {}
         
-        # Start periodic metrics update
-        self._update_metrics_display()
-        
-        # Event callback for pipeline
+        # Work posted by pipeline threads, run on the Tk thread by the
+        # periodic update loop (Tk widgets must only be touched from here)
+        self._ui_queue: queue.SimpleQueue[Callable[[], None]] = queue.SimpleQueue()
         self.event_count = 0
         self.chunk_count = 0
+        
+        # Start periodic metrics update
+        self._update_metrics_display()
     
     def _on_toggle_api(self, enabled: bool) -> Optional[str]:
         """Start or stop the local API server.
@@ -549,20 +557,19 @@ class AudioAnalysisGUI(tk.Tk):
                 audio_source = ApplicationAudioSource(
                     application_name=self.selected_device.application_name,
                     sample_rate=self.selected_device.sample_rate,
-                    block_size=2048,
+                    block_size=AUDIO_BLOCK_SIZE,
                 )
             else:
                 audio_source = AudioInputSource(
                     device=self.selected_device.device_id,
                     sample_rate=self.selected_device.sample_rate,
-                    block_size=2048,
+                    block_size=AUDIO_BLOCK_SIZE,
                 )
             
             # Create pipeline (shares the persistent feature_cache so the
             # local API keeps serving data across start/stop cycles)
             self.pipeline = AudioPipeline(
                 audio_source=lambda: audio_source,
-                n_processing_workers=4,
                 sample_rate=self.selected_device.sample_rate,
                 event_callback=self._on_pipeline_event,
                 feature_cache=self.feature_cache,
@@ -591,13 +598,19 @@ class AudioAnalysisGUI(tk.Tk):
     
     def _run_pipeline(self) -> None:
         """Run the pipeline (called in separate thread)."""
+        pipeline = self.pipeline
         try:
-            self.pipeline.start()
-            self.pipeline.wait()
+            pipeline.start()
+            pipeline.wait()
         except Exception as e:
             logger.error(f"Pipeline error: {e}")
         finally:
-            self.control_panel._on_stop_click()
+            # Reset the controls on the Tk thread, unless the user already
+            # stopped (or restarted) analysis
+            def on_ended() -> None:
+                if self.pipeline is pipeline:
+                    self.control_panel._on_stop_click()
+            self._ui_queue.put(on_ended)
     
     def _on_stop_analysis(self) -> None:
         """Stop the audio analysis pipeline."""
@@ -616,6 +629,7 @@ class AudioAnalysisGUI(tk.Tk):
     
     def _update_metrics_display(self) -> None:
         """Periodically update metrics display with latest features from pipeline."""
+        self._drain_ui_queue()
         if self.pipeline and self.pipeline.is_running():
             # Get latest features from pipeline cache (thread-safe)
             fast, medium, slow = self.pipeline.feature_cache.get_all()
@@ -637,18 +651,32 @@ class AudioAnalysisGUI(tk.Tk):
         )
         self.metrics_display.update_bpm_estimates(self.last_bpm_estimates)
         
-        # Schedule next update (every 100ms = ~10 FPS)
-        self.after(100, self._update_metrics_display)
+        # Schedule next update (every 50ms = ~20 FPS)
+        self.after(50, self._update_metrics_display)
+    
+    def _drain_ui_queue(self) -> None:
+        """Run work posted by pipeline threads (on the Tk thread)."""
+        while True:
+            try:
+                task = self._ui_queue.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                task()
+            except Exception:  # noqa: BLE001 - keep the update loop alive
+                logger.exception("UI task failed")
     
     def _on_pipeline_event(self, event_type: str, data: dict) -> None:
-        """Handle events from the pipeline.
+        """Handle events from the pipeline (called from the real-time thread).
         
         Args:
             event_type: Type of event
             data: Event data dictionary
         """
-        self.event_count += 1
-        self.analysis_logger.log_event(event_type, data)
+        def log() -> None:
+            self.event_count += 1
+            self.analysis_logger.log_event(event_type, data)
+        self._ui_queue.put(log)
 
 
 def launch_gui() -> None:

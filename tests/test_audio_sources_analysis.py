@@ -96,14 +96,12 @@ def _collect_pipeline_results(pipeline, max_wait_s: float = 60.0) -> dict:
 def test_local_file_streaming_pipeline() -> None:
     """STREAMING TEST: Process audio in real-time using AudioPipeline workers.
     
-    This demonstrates the multi-threaded pipeline processing chunks as they arrive,
-    rather than processing all chunks synchronously after reading.
-    
+    This demonstrates the pipeline analyzing audio as it arrives, rather than
+    processing all chunks synchronously after reading.
+
     Expected behavior:
     - Audio reading and analysis happen concurrently
     - Total time should be ~30-35s (close to audio duration), not 85s+
-    - Multiple analysis results stream through (one per chunk processed)
-    - Workers should be actively processing chunks in parallel
     """
     audio_file = _require_file(settings.USB_SIMULATION_FILE, "USB_SIMULATION_FILE")
     
@@ -112,9 +110,8 @@ def test_local_file_streaming_pipeline() -> None:
     print(f"\n{'='*72}")
     print(f"STREAMING PIPELINE TEST")
     print(f"{'='*72}")
-    print(f"[Pipeline Test] Goal: Process 30s audio with workers running in parallel")
+    print(f"[Pipeline Test] Goal: Process 30s audio while it is being read")
     print(f"[Pipeline Test] Expected: ~30-35s total (not 85s like synchronous analysis)")
-    print(f"[Pipeline Test] Using 4 processing workers for parallel feature extraction")
     
     # Create audio source generator
     def audio_source_gen():
@@ -126,17 +123,14 @@ def test_local_file_streaming_pipeline() -> None:
     # Create and start pipeline
     pipeline = AudioPipeline(
         audio_source=audio_source_gen,
-        n_processing_workers=4,
-        buffer_capacity_s=5.0,
-        sample_rate=48000,
+        sample_rate=sf.info(str(audio_file)).samplerate,
     )
     
-    print(f"\n[Pipeline] Starting 4 worker threads...")
+    print(f"\n[Pipeline] Starting capture, real-time and job scheduler threads...")
     pipeline.start()
     print(f"[Pipeline] ✓ Capture worker: running")
-    print(f"[Pipeline] ✓ Processing workers (4): running")
-    print(f"[Pipeline] ✓ Analysis worker: running")
-    print(f"[Pipeline] ✓ Rendering worker: running")
+    print(f"[Pipeline] ✓ Real-time worker: running")
+    print(f"[Pipeline] ✓ Job scheduler: running")
     
     # Collect results
     results = _collect_pipeline_results(pipeline, max_wait_s=120.0)

@@ -1,23 +1,23 @@
 """Multiple independent BPM/tempo detection algorithms, run in parallel.
 
-The single onset-timestamp BPM estimator used elsewhere in this project
-(``SlowAnalyzer``/``BeatPredictor``) is very sensitive to missed or spurious
-onset detections, which causes large BPM jitter even on tracks with a very
-stable beat. This module implements three *independent* algorithms that
-each estimate BPM directly from a raw audio window, so a single bad onset
-detection can no longer swing the result.
+Estimating BPM from individual onset timestamps is very sensitive to
+missed or spurious onset detections, which causes large BPM jitter even on
+tracks with a very stable beat. This module implements three *independent*
+algorithms that each estimate BPM directly from a raw audio window, so a
+single bad onset detection can no longer swing the result.
 
 Methods implemented:
     - ``dynamic_kick_band``: find the dominant low-frequency peak per
       window (adaptive kick frequency) and narrow-band around it before
       autocorrelating - handles tracks whose kick isn't at a fixed pitch.
-    - ``comb_filter_bank``: classic Scheirer-style comb filter bank scored
-      directly against BPM candidates in-range (robust to octave errors).
+    - ``comb_filter_bank``: normalized autocorrelation of the loudness
+      envelope, scored at every BPM candidate on a fine grid in-range.
     - ``librosa_beat_track``: librosa's dynamic-programming beat tracker.
 
 All detectors share the same signature
 ``(waveform: np.ndarray, sample_rate: int, min_bpm: float, max_bpm: float) -> BPMEstimate``
-so :class:`MultiMethodBPMAnalyzer` can fan them out to a thread pool.
+so :class:`MultiMethodBPMAnalyzer` can fan them out to a thread pool, and
+:func:`analyze_all_methods` can run them in a worker process.
 Threads (not processes) are used because the underlying numpy/scipy/librosa
 calls release the GIL for the bulk of their computation, giving real
 wall-clock parallelism without the overhead of copying audio across
@@ -31,7 +31,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Callable, Mapping
 
-import librosa
 import numpy as np
 from scipy import signal as scipy_signal
 
@@ -76,12 +75,24 @@ def _bandpass(y: np.ndarray, sr: int, low_hz: float, high_hz: float, order: int 
     return scipy_signal.sosfiltfilt(sos, y)
 
 
+def _framed_rms(x: np.ndarray, frame_len: int, hop: int) -> np.ndarray:
+    """Centered (zero-padded) framed RMS, equivalent to ``librosa.feature.rms``.
+
+    Implemented with numpy so the two non-librosa detectors don't pay
+    librosa's import cost (seconds) in a fresh worker process.
+    """
+    pad = frame_len // 2
+    padded = np.pad(x.astype(np.float64), (pad, pad))
+    frames = np.lib.stride_tricks.sliding_window_view(padded, frame_len)[::hop]
+    return np.sqrt(np.mean(frames ** 2, axis=1))
+
+
 def _onset_envelope(x: np.ndarray, sr: int, envelope_rate_hz: float = 200.0) -> tuple[np.ndarray, float]:
     """Half-wave rectified energy-flux envelope (emphasizes attacks/transients)."""
     hop = max(1, int(round(sr / envelope_rate_hz)))
     frame_len = max(hop * 2, 32)
-    rms = librosa.feature.rms(y=x.astype(np.float32), frame_length=frame_len, hop_length=hop, center=True)[0]
-    flux = np.diff(rms.astype(np.float64), prepend=rms[0])
+    rms = _framed_rms(x, frame_len, hop)
+    flux = np.diff(rms, prepend=rms[0])
     onset_strength = np.maximum(flux, 0.0)
     actual_rate = sr / hop
     return onset_strength, float(actual_rate)
@@ -91,9 +102,9 @@ def _energy_envelope(x: np.ndarray, sr: int, envelope_rate_hz: float = 200.0) ->
     """Raw (non-differentiated) RMS energy contour - captures loudness pulsing."""
     hop = max(1, int(round(sr / envelope_rate_hz)))
     frame_len = max(hop * 2, 32)
-    rms = librosa.feature.rms(y=x.astype(np.float32), frame_length=frame_len, hop_length=hop, center=True)[0]
+    rms = _framed_rms(x, frame_len, hop)
     actual_rate = sr / hop
-    return rms.astype(np.float64), float(actual_rate)
+    return rms, float(actual_rate)
 
 
 def _autocorrelation_bpm(
@@ -167,9 +178,9 @@ def detect_dynamic_kick_band(
     """Detect the dominant low-frequency peak (the actual kick pitch) per
     window, band-pass a narrow range around it, then autocorrelate.
 
-    Unlike :func:`detect_kick_band_autocorrelation`, the frequency range is
-    not fixed - it adapts to whatever the loudest low-end fundamental is,
-    which is more precise for kicks tuned outside the generic 40-120 Hz box.
+    The frequency range is not fixed - it adapts to whatever the loudest
+    low-end fundamental is, which is more precise for kicks tuned outside a
+    generic 40-120 Hz box.
     """
     method = "dynamic_kick_band"
     try:
@@ -215,10 +226,9 @@ def detect_comb_filter_bank(
     step_bpm: float = 0.5,
 ) -> BPMEstimate:
     """Score a fine-grained grid of BPM candidates directly (normalized
-    lagged autocorrelation on the raw loudness envelope). Because every
-    candidate is evaluated explicitly within ``[min_bpm, max_bpm]``, this is
-    naturally robust to the octave (half/double tempo) errors that plague
-    unconstrained autocorrelation peak-picking.
+    lagged autocorrelation on the raw loudness envelope). Every candidate is
+    evaluated explicitly within ``[min_bpm, max_bpm]``; half/double tempo
+    can still score similarly, which :func:`consensus_bpm` accounts for.
     """
     method = "comb_filter_bank"
     try:
@@ -267,6 +277,8 @@ def detect_librosa_beat_track(
     """Librosa's ``beat.beat_track`` (onset envelope + dynamic programming)."""
     method = "librosa_beat_track"
     try:
+        import librosa  # heavy import (seconds), only paid by this detector
+
         if y.size < sr * 2:
             return BPMEstimate(method, None, 0.0, error="need >= 2s of audio")
         start_bpm = float(np.clip(120.0, min_bpm, max_bpm))
@@ -296,6 +308,45 @@ _ALL_DETECTORS: dict[str, DetectorFn] = {
     "comb_filter_bank": detect_comb_filter_bank,
     "librosa_beat_track": detect_librosa_beat_track,
 }
+
+
+# Detectors that only need numpy/scipy (fast to start in a fresh process),
+# vs. the librosa one (importing librosa takes seconds in a fresh process).
+SIGNAL_METHODS: tuple[str, ...] = ("dynamic_kick_band", "comb_filter_bank")
+LIBROSA_METHODS: tuple[str, ...] = ("librosa_beat_track",)
+
+
+def _run_methods(
+    methods: tuple[str, ...], waveform: np.ndarray, sample_rate: int, min_bpm: float, max_bpm: float
+) -> dict[str, BPMEstimate]:
+    y = np.asarray(waveform, dtype=np.float32).reshape(-1)
+    return {name: _ALL_DETECTORS[name](y, sample_rate, min_bpm, max_bpm) for name in methods}
+
+
+def analyze_all_methods(
+    waveform: np.ndarray,
+    sample_rate: int,
+    min_bpm: float = DEFAULT_MIN_BPM,
+    max_bpm: float = DEFAULT_MAX_BPM,
+) -> dict[str, BPMEstimate]:
+    """Run every registered detector sequentially on the same window.
+
+    Module-level and side-effect free so it can be submitted to a process
+    pool; use :class:`MultiMethodBPMAnalyzer` for in-process thread-parallel
+    runs.
+    """
+    return _run_methods(tuple(_ALL_DETECTORS), waveform, sample_rate, min_bpm, max_bpm)
+
+
+def analyze_signal_methods(waveform: np.ndarray, sample_rate: int) -> dict[str, BPMEstimate]:
+    """Run only the numpy/scipy detectors (the pipeline's fast BPM job)."""
+    return _run_methods(SIGNAL_METHODS, waveform, sample_rate, DEFAULT_MIN_BPM, DEFAULT_MAX_BPM)
+
+
+def analyze_librosa_methods(waveform: np.ndarray, sample_rate: int) -> dict[str, BPMEstimate]:
+    """Run only the librosa detector (a separate job, so its slow first
+    import never delays the other estimates)."""
+    return _run_methods(LIBROSA_METHODS, waveform, sample_rate, DEFAULT_MIN_BPM, DEFAULT_MAX_BPM)
 
 
 class MultiMethodBPMAnalyzer:
@@ -336,6 +387,19 @@ class MultiMethodBPMAnalyzer:
         self._executor.shutdown(wait=wait)
 
 
+# Two tempi within this relative tolerance (after octave folding) agree.
+TEMPO_AGREEMENT_TOLERANCE = 0.04
+
+
+def _octave_aligned(bpm: float, reference: float) -> float | None:
+    """Return ``bpm`` scaled by 1/2, 1 or 2 to match ``reference``, or None."""
+    for factor in (1.0, 2.0, 0.5):
+        candidate = bpm * factor
+        if abs(candidate - reference) <= TEMPO_AGREEMENT_TOLERANCE * reference:
+            return candidate
+    return None
+
+
 def consensus_bpm(
     estimates: Mapping[str, BPMEstimate],
     start_threshold: float = 0.95,
@@ -343,30 +407,33 @@ def consensus_bpm(
 ) -> tuple[float | None, float]:
     """Combine per-method estimates into one consensus BPM.
 
-    Starts by requiring near-unanimous agreement (confidence >= 0.95): if
-    exactly one method clears the bar, its estimate wins outright; if
-    several do, their BPMs are averaged. If none clear the bar, the
-    threshold is relaxed by ``step`` (0.90, then 0.85, ...) and the same
-    check is repeated, so consensus only ever comes from the highest
-    confidence tier that actually has agreement.
+    Starts by requiring near-unanimous agreement (confidence >= 0.95) and
+    relaxes the threshold by ``step`` (0.90, 0.85, ...) until at least one
+    method clears it. Within that tier the most confident estimate sets the
+    tempo; other estimates in the tier are averaged in only if they agree
+    with it (half/double tempo are folded onto it first), so an octave
+    disagreement such as 64 vs 128 BPM never averages to a meaningless 96.
     """
     valid = [e for e in estimates.values() if e.available and e.bpm is not None and e.confidence > 0]
     if not valid:
         return None, 0.0
 
     steps = int(round(start_threshold / step)) + 1
+    matches: list[BPMEstimate] = []
     for i in range(steps):
         threshold = start_threshold - i * step
         matches = [e for e in valid if e.confidence >= threshold]
         if matches:
-            bpm = float(np.mean([e.bpm for e in matches]))
-            confidence = float(np.mean([e.confidence for e in matches]))
-            return bpm, confidence
+            break
+    if not matches:  # float rounding left the last threshold slightly above 0
+        matches = valid
 
-    # Every estimate had confidence > 0, so the threshold=0 pass above
-    # always matches; this is unreachable but kept as a safe fallback.
-    weights = np.array([e.confidence for e in valid], dtype=np.float64)
-    bpms = np.array([e.bpm for e in valid], dtype=np.float64)
-    combined_bpm = float(np.average(bpms, weights=weights))
-    combined_confidence = float(min(1.0, np.mean(weights)))
-    return combined_bpm, combined_confidence
+    leader = max(matches, key=lambda e: e.confidence)
+    agreeing: list[tuple[float, float]] = []  # (aligned bpm, confidence)
+    for e in matches:
+        aligned = _octave_aligned(float(e.bpm), float(leader.bpm))
+        if aligned is not None:
+            agreeing.append((aligned, e.confidence))
+    bpm = float(np.mean([b for b, _ in agreeing]))
+    confidence = float(np.mean([c for _, c in agreeing]))
+    return bpm, confidence

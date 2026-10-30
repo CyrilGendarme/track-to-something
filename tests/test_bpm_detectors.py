@@ -146,3 +146,25 @@ def test_consensus_bpm_returns_none_when_no_estimates_available() -> None:
     bpm, confidence = consensus_bpm(estimates)
     assert bpm is None
     assert confidence == 0.0
+
+
+def test_consensus_bpm_never_averages_across_octave_disagreement() -> None:
+    # Two equally confident methods disagreeing on tempo: the leader wins
+    # outright instead of averaging to a meaningless value.
+    estimates = {
+        "a": _estimate("a", 128.0, 0.97),
+        "b": _estimate("b", 90.0, 0.96),
+    }
+    bpm, _ = consensus_bpm(estimates)
+    assert bpm == pytest.approx(128.0)
+
+
+def test_consensus_bpm_folds_half_and_double_tempo_onto_leader() -> None:
+    estimates = {
+        "a": _estimate("a", 128.0, 0.99),
+        "b": _estimate("b", 64.2, 0.97),   # half tempo
+        "c": _estimate("c", 255.0, 0.96),  # double tempo
+    }
+    bpm, confidence = consensus_bpm(estimates)
+    assert bpm == pytest.approx((128.0 + 128.4 + 127.5) / 3)
+    assert confidence == pytest.approx((0.99 + 0.97 + 0.96) / 3)

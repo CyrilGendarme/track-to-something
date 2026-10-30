@@ -69,18 +69,21 @@ class RealTimeMetricsDisplay(ttk.Frame):
         
         # Define all metrics to display
         self.metrics = {
-            # FAST TIER (5-10ms)
+            # FAST TIER (every hop)
             "fast_raw_energy": MetricField("Raw Energy", "raw_energy", "fast", "{:.3f}", "", True, 1.0),
             "fast_onset_strength": MetricField("Onset Strength", "onset_strength", "fast", "{:.3f}", "", True, 1.0),
-            "fast_peak_strength": MetricField("Peak Strength", "percussive_peak_strength", "fast", "{:.3f}", "", True, 1.0),
+            "fast_peak_strength": MetricField("Kick Strength", "percussive_peak_strength", "fast", "{:.3f}", "", True, 1.0),
+            "fast_beat_phase": MetricField("Beat Phase", "beat_phase", "fast", "{:.2f}", "", True, 1.0),
+            "fast_beat_lock": MetricField("Beat Lock", "beat_confidence", "fast", "{:.2f}", "", True, 1.0),
+            "fast_tempo": MetricField("Tracked Tempo", "tempo_bpm", "fast", "{:.1f}", " BPM"),
             
-            # MEDIUM TIER (20-50ms)
+            # MEDIUM TIER (every hop, smoothed)
             "medium_bass": MetricField("Bass Energy", "bass_energy", "medium", "{:.3f}", "", True, 1.0),
             "medium_mid": MetricField("Mid Energy", "mid_energy", "medium", "{:.3f}", "", True, 1.0),
             "medium_high": MetricField("High Energy", "high_energy", "medium", "{:.3f}", "", True, 1.0),
             "medium_bass_delta": MetricField("Bass Delta", "bass_energy_delta", "medium", "{:+.3f}", ""),
             
-            # SLOW TIER (100-500ms)
+            # SLOW TIER (background jobs)
             "slow_amplitude": MetricField("Amplitude", "overall_amplitude", "slow", "{:.3f}", "", True, 1.0),
             "slow_rms": MetricField("RMS", "rms", "slow", "{:.3f}", "", True, 1.0),
             "slow_peak": MetricField("Peak", "peak", "slow", "{:.3f}", "", True, 1.0),

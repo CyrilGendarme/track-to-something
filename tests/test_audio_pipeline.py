@@ -1,159 +1,107 @@
-"""Tests for multi-threaded audio pipeline."""
+"""End-to-end tests for the audio pipeline on synthetic audio."""
 
 from __future__ import annotations
 
-import time
-from pathlib import Path
-from typing import Iterator
-
+import numpy as np
 import pytest
-import soundfile as sf
 
 from src.engine import AudioPipeline
-from src.sources import AudioChunk
-from tests import settings
+from tests.synthetic import chunked_source, kick_track
+
+SR = 44100
+BPM = 128.0
 
 
-def file_chunks(path: Path, block_size: int, max_duration_s: float | None = None) -> Iterator[AudioChunk]:
-    """Yield audio chunks from a file."""
-    with sf.SoundFile(path, mode="r") as audio_file:
-        print(f"[File] Loading {path.name}: {audio_file.samplerate}Hz, {audio_file.channels}ch")
-        chunk_count = 0
-        total_samples = 0
-        max_samples = int(audio_file.samplerate * max_duration_s) if max_duration_s else None
-        
-        while True:
-            samples = audio_file.read(block_size, dtype="float32", always_2d=True)
-            if len(samples) == 0:
-                print(f"[File] Finished reading {chunk_count} chunks ({total_samples/audio_file.samplerate:.1f}s)")
-                return
-            
-            # Stop if we've reached max duration
-            if max_samples and total_samples + len(samples) > max_samples:
-                remaining = max_samples - total_samples
-                samples = samples[:remaining]
-                total_samples += len(samples)
-                chunk_count += 1
-                yield AudioChunk(samples=samples, sample_rate=audio_file.samplerate)
-                print(f"[File] Finished reading {chunk_count} chunks ({total_samples/audio_file.samplerate:.1f}s) [limited to {max_duration_s}s]")
-                return
-            
-            total_samples += len(samples)
-            chunk_count += 1
-            if chunk_count % 10 == 0:
-                print(f"[File] Read {chunk_count} chunks ({total_samples/audio_file.samplerate:.1f}s)...")
-            yield AudioChunk(samples=samples, sample_rate=audio_file.samplerate)
-
-
-def test_pipeline_basic() -> None:
-    """Test basic pipeline operation."""
-    audio_file = settings.USB_SIMULATION_FILE
-    if audio_file is None or not audio_file.is_file():
-        pytest.skip("USB_SIMULATION_FILE not configured")
-    
-    events_detected = []
-    
-    def on_event(event_type: str, data: dict) -> None:
-        events_detected.append((event_type, data.get("timestamp", 0.0)))
-    
-    # Create pipeline
+def _run(duration_s: float, speed: float, use_processes: bool):
+    y = kick_track(BPM, duration_s, SR)
+    events: list[tuple[str, dict]] = []
     pipeline = AudioPipeline(
-        audio_source=lambda: file_chunks(audio_file, settings.BLOCK_SIZE, max_duration_s=10),
-        n_processing_workers=2,
-        event_callback=on_event,
+        audio_source=chunked_source(y, SR, speed=speed),
+        sample_rate=SR,
+        event_callback=lambda kind, data: events.append((kind, data)),
+        use_processes=use_processes,
     )
-    
-    # Start and run
-    print("\n[Test] Starting pipeline")
     pipeline.start()
-    
-    try:
-        # Wait for completion with timeout
-        start_time = time.time()
-        timeout = 30.0
-        while pipeline.is_running() and time.time() - start_time < timeout:
-            time.sleep(0.5)
-        
-        if pipeline.is_running():
-            print("[Test] Pipeline timeout, stopping")
-    finally:
-        pipeline.stop()
-        pipeline.wait(timeout=5.0)
-    
-    # Verify pipeline ran
-    events = pipeline.get_events()
-    print(f"\n[Test] Pipeline completed with {len(events)} events")
-    
-    assert len(events) >= 0, "Pipeline should process audio"
-    assert not pipeline.is_running(), "Pipeline should be stopped"
+    pipeline.wait(timeout=60.0)
+    return pipeline, events
 
 
-def test_pipeline_with_multiple_workers() -> None:
-    """Test pipeline with multiple processing workers."""
-    audio_file = settings.USB_SIMULATION_FILE
-    if audio_file is None or not audio_file.is_file():
-        pytest.skip("USB_SIMULATION_FILE not configured")
-    
-    # Create pipeline with 4 workers
-    # Use a longer clip than the 1s liveness check below so the finite file
-    # source doesn't finish reading before we assert workers are still running
-    pipeline = AudioPipeline(
-        audio_source=lambda: file_chunks(audio_file, settings.BLOCK_SIZE, max_duration_s=30),
-        n_processing_workers=4,
-    )
-    
+def test_pipeline_analyzes_every_hop_in_order() -> None:
+    pipeline, events = _run(duration_s=6.0, speed=4.0, use_processes=False)
+    realtime = pipeline.realtime_worker
+
+    assert not pipeline.is_running()
+    assert realtime.hops_skipped == 0
+    assert realtime.hops_processed == int(6.0 * SR) // realtime.hop_size
+
+    onset_times = [data["timestamp"] for kind, data in events if kind == "onset"]
+    assert onset_times == sorted(onset_times)
+    # Every kick produces an onset (6s at 128 BPM = 13 kicks, first one during warm-up)
+    assert len(onset_times) >= 10
+
+    fast, medium, slow = pipeline.feature_cache.get_all()
+    assert fast is not None and medium is not None and slow is not None
+    assert 0.0 <= medium.bass_energy <= 1.0
+    assert slow.spectral_density_low > slow.spectral_density_high
+
+
+def test_pipeline_tracks_tempo_beats_and_key() -> None:
+    pipeline, events = _run(duration_s=12.0, speed=3.0, use_processes=False)
+    fast, _, slow = pipeline.feature_cache.get_all()
+
+    assert slow.estimated_bpm == pytest.approx(BPM, abs=2.0)
+    assert slow.detected_key == "C"
+    assert fast.tempo_bpm == pytest.approx(BPM, abs=2.0)
+    assert fast.beat_confidence > 0.5
+
+    # Once locked, emitted beats sit on the true beat grid (within ~20ms)
+    period = 60.0 / BPM
+    late_beats = [d["timestamp"] for kind, d in events if kind == "beat" and d["timestamp"] > 6.0]
+    assert len(late_beats) >= 10
+    errors = [((b + period / 2) % period) - period / 2 for b in late_beats]
+    assert max(abs(e) for e in errors) < 0.02
+
+
+def test_pipeline_jobs_run_in_worker_processes() -> None:
+    pipeline, _ = _run(duration_s=14.0, speed=1.0, use_processes=True)
+    jobs = {job.name: job for job in pipeline.jobs}
+    assert jobs["bpm"].runs >= 1 and jobs["key"].runs >= 1
+    _, _, slow = pipeline.feature_cache.get_all()
+    assert slow.estimated_bpm == pytest.approx(BPM, abs=2.0)
+    assert slow.detected_key == "C"
+
+
+def test_pipeline_stop_ends_blocking_source() -> None:
+    """stop() must unblock a source that is waiting for device data."""
+    import threading
+
+    from src.sources import AudioChunk
+
+    class BlockingSource:
+        def __init__(self):
+            self.closed = threading.Event()
+
+        def __iter__(self):
+            yield AudioChunk(np.zeros((512, 2), dtype=np.float32), SR)
+            self.closed.wait()  # like a device read with no data arriving
+
+        def close(self):
+            self.closed.set()
+
+    source = BlockingSource()
+    pipeline = AudioPipeline(audio_source=lambda: source, sample_rate=SR, use_processes=False)
     pipeline.start()
-    
-    try:
-        # Give it time to run
-        time.sleep(1.0)
-        
-        # Check all workers are running
-        assert pipeline.capture_worker.is_alive(), "Capture worker should be running"
-        assert all(w.is_alive() for w in pipeline.processing_workers), "Processing workers should be running"
-        assert pipeline.analysis_worker.is_alive(), "Analysis worker should be running"
-        assert pipeline.rendering_worker.is_alive(), "Rendering worker should be running"
-    finally:
-        pipeline.stop()
-        pipeline.wait(timeout=5.0)
-    
-    assert not pipeline.is_running(), "Pipeline should be stopped"
+    pipeline.stop()
+    pipeline.wait(timeout=5.0)
+    assert source.closed.is_set()
+    assert not pipeline.capture_worker.is_alive()
+    assert not pipeline.realtime_worker.is_alive()
 
 
-def test_pipeline_event_detection() -> None:
-    """Test that pipeline detects events correctly."""
-    audio_file = settings.USB_SIMULATION_FILE
-    if audio_file is None or not audio_file.is_file():
-        pytest.skip("USB_SIMULATION_FILE not configured")
-    
-    events_detected = []
-    
-    def on_event(event_type: str, data: dict) -> None:
-        events_detected.append((event_type, data))
-    
-    pipeline = AudioPipeline(
-        audio_source=lambda: file_chunks(audio_file, settings.BLOCK_SIZE, max_duration_s=10),
-        n_processing_workers=2,
-        event_callback=on_event,
-    )
-    
+def test_pipeline_rejects_mismatched_sample_rate() -> None:
+    y = kick_track(BPM, 1.0, 48000)
+    pipeline = AudioPipeline(audio_source=chunked_source(y, 48000), sample_rate=SR, use_processes=False)
     pipeline.start()
-    
-    try:
-        # Wait for processing
-        start_time = time.time()
-        while time.time() - start_time < 20.0:
-            if not pipeline.is_running():
-                break
-            time.sleep(0.5)
-    finally:
-        pipeline.stop()
+    with pytest.raises(ValueError, match="sample rate"):
         pipeline.wait(timeout=5.0)
-    
-    # Check event detection
-    beat_events = [e for e in events_detected if e[0] == "beat"]
-    transient_events = [e for e in events_detected if e[0] == "transient"]
-    
-    print(f"\n[Test] Detected {len(beat_events)} beat events, {len(transient_events)} transient events")
-    # Events may or may not be detected depending on audio content, just verify we got here
-    assert True, "Event detection should complete without error"
+    pipeline.stop()

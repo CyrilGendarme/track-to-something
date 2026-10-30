@@ -37,12 +37,10 @@ def main():
         print("Please update the path in this example")
         return
     
-    # Create pipeline with 2 processing workers
+    # The pipeline sample rate must match the source
     pipeline = AudioPipeline(
         audio_source=lambda: example_file_source(audio_file, block_size=4096),
-        n_processing_workers=2,
-        buffer_capacity_s=5.0,
-        sample_rate=48000,
+        sample_rate=sf.info(str(audio_file)).samplerate,
         event_callback=on_event,
     )
     

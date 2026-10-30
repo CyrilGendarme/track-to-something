@@ -5,31 +5,33 @@ via environment variables (MOSHPRO_* prefix).
 
 Example:
     export MOSHPRO_SAMPLE_RATE=48000
-    export MOSHPRO_BUFFER_CAPACITY_SECONDS=10.0
+    export MOSHPRO_BPM_INTERVAL_S=2.0
 """
 
 from .settings import (
-    # Audio capture & processing
+    # Audio capture
     DEFAULT_SAMPLE_RATE,
-    AUDIO_CHUNK_SIZE,
+    AUDIO_BLOCK_SIZE,
     AUDIO_BIT_DEPTH,
-    AUDIO_CHANNELS,
     AUDIO_APPLY_HPF,
     # Buffer
     BUFFER_CAPACITY_SECONDS,
-    # Analysis windows
-    FAST_WINDOW_MS,
-    MEDIUM_WINDOW_MS,
-    SLOW_WINDOW_MS,
-    BEAT_ANALYSIS_WINDOW_MS,
-    TONALITY_HISTORY_SIZE,
-    # Tiered analysis decimation
-    SPECTRAL_ANALYSIS_DECIMATION,
-    TEMPO_ANALYSIS_DECIMATION,
-    # STFT
-    STFT_FFT_SIZE,
-    STFT_HOP_LENGTH,
-    STFT_WINDOW,
+    # Real-time path
+    REALTIME_HOP_SIZE,
+    REALTIME_FFT_SIZE,
+    ONSET_MIN_INTERVAL_S,
+    KICK_MIN_INTERVAL_S,
+    ONSET_THRESHOLD_K,
+    SILENCE_RMS,
+    # Background jobs
+    DYNAMICS_INTERVAL_S,
+    DYNAMICS_WINDOW_S,
+    BPM_INTERVAL_S,
+    BPM_WINDOW_S,
+    KEY_INTERVAL_S,
+    KEY_WINDOW_S,
+    KEY_HISTORY_SIZE,
+    JOBS_USE_PROCESSES,
     # Frequency bands
     FREQ_BAND_BASS_MIN,
     FREQ_BAND_BASS_MAX,
@@ -37,61 +39,47 @@ from .settings import (
     FREQ_BAND_MID_MAX,
     FREQ_BAND_HIGH_MIN,
     FREQ_BAND_HIGH_MAX,
-    # Threading
-    NUM_PROCESSING_WORKERS,
-    OUTPUT_QUEUE_MAXSIZE,
-    # Detection thresholds
-    ONSET_THRESHOLD,
-    BEAT_CONFIDENCE_THRESHOLD,
-    SILENCE_THRESHOLD,
+    # Offline analysis
+    STFT_FFT_SIZE,
+    STFT_HOP_LENGTH,
     # Logging
     LOG_LEVEL,
-    DEBUG_WORKERS,
-    DEBUG_ANALYSIS,
     # Local API
     API_HOST,
     API_PORT,
+    API_MAX_PUSH_HZ,
 )
 
 __all__ = [
-    # Audio capture & processing
     "DEFAULT_SAMPLE_RATE",
-    "AUDIO_CHUNK_SIZE",
+    "AUDIO_BLOCK_SIZE",
     "AUDIO_BIT_DEPTH",
-    "AUDIO_CHANNELS",
     "AUDIO_APPLY_HPF",
-    # Buffer
     "BUFFER_CAPACITY_SECONDS",
-    # Analysis windows
-    "FAST_WINDOW_MS",
-    "MEDIUM_WINDOW_MS",
-    "SLOW_WINDOW_MS",
-    # Tiered analysis decimation
-    "SPECTRAL_ANALYSIS_DECIMATION",
-    "TEMPO_ANALYSIS_DECIMATION",
-    # STFT
-    "STFT_FFT_SIZE",
-    "STFT_HOP_LENGTH",
-    "STFT_WINDOW",
-    # Frequency bands
+    "REALTIME_HOP_SIZE",
+    "REALTIME_FFT_SIZE",
+    "ONSET_MIN_INTERVAL_S",
+    "KICK_MIN_INTERVAL_S",
+    "ONSET_THRESHOLD_K",
+    "SILENCE_RMS",
+    "DYNAMICS_INTERVAL_S",
+    "DYNAMICS_WINDOW_S",
+    "BPM_INTERVAL_S",
+    "BPM_WINDOW_S",
+    "KEY_INTERVAL_S",
+    "KEY_WINDOW_S",
+    "KEY_HISTORY_SIZE",
+    "JOBS_USE_PROCESSES",
     "FREQ_BAND_BASS_MIN",
     "FREQ_BAND_BASS_MAX",
     "FREQ_BAND_MID_MIN",
     "FREQ_BAND_MID_MAX",
     "FREQ_BAND_HIGH_MIN",
     "FREQ_BAND_HIGH_MAX",
-    # Threading
-    "NUM_PROCESSING_WORKERS",
-    "OUTPUT_QUEUE_MAXSIZE",
-    # Detection thresholds
-    "ONSET_THRESHOLD",
-    "BEAT_CONFIDENCE_THRESHOLD",
-    "SILENCE_THRESHOLD",
-    # Logging
+    "STFT_FFT_SIZE",
+    "STFT_HOP_LENGTH",
     "LOG_LEVEL",
-    "DEBUG_WORKERS",
-    "DEBUG_ANALYSIS",
-    # Local API
     "API_HOST",
     "API_PORT",
+    "API_MAX_PUSH_HZ",
 ]

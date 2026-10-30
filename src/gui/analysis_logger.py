@@ -143,10 +143,7 @@ class AnalysisLogger:
         self.entries.append(result)
         
         # Update text widget
-        self.text_widget.config(state=tk.NORMAL)
-        self.text_widget.insert(tk.END, result.as_row() + "\n", tag)
-        self.text_widget.see(tk.END)  # Auto-scroll to bottom
-        self.text_widget.config(state=tk.DISABLED)
+        self._append(result.as_row() + "\n", tag)
     
     def log_event(self, event_type: str, data: dict) -> None:
         """Log a detected event.
@@ -159,10 +156,17 @@ class AnalysisLogger:
             return
         
         message = f">>> EVENT: {event_type} | {data}\n"
-        
+        self._append(message, "success")
+
+    def _append(self, text: str, tag: str | None) -> None:
+        """Append a line, dropping the oldest lines beyond ``max_entries``."""
         self.text_widget.config(state=tk.NORMAL)
-        self.text_widget.insert(tk.END, message, "success")
-        self.text_widget.see(tk.END)
+        self.text_widget.insert(tk.END, text, tag)
+        excess = int(self.text_widget.index("end-1c").split(".")[0]) - self.max_entries
+        if excess > 0:
+            # Keep the header line (line 1)
+            self.text_widget.delete("2.0", f"{2 + excess}.0")
+        self.text_widget.see(tk.END)  # Auto-scroll to bottom
         self.text_widget.config(state=tk.DISABLED)
     
     def clear(self) -> None:

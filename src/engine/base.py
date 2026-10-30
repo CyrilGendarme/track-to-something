@@ -5,8 +5,6 @@ from __future__ import annotations
 import logging
 import threading
 from abc import ABC, abstractmethod
-from queue import Queue
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -59,38 +57,3 @@ class Worker(ABC, threading.Thread):
         super().join(timeout=timeout)
         if self._error:
             raise self._error
-
-
-class QueuedWorker(Worker):
-    """Base worker that receives work items from a queue."""
-
-    def __init__(self, name: str, input_queue: Queue, daemon: bool = False):
-        """Initialize queued worker.
-        
-        Args:
-            name: Worker thread name
-            input_queue: Queue to receive work items from
-            daemon: If True, thread will not prevent program exit
-        """
-        super().__init__(name=name, daemon=daemon)
-        self.input_queue = input_queue
-
-    @abstractmethod
-    def _process_item(self, item: Any) -> None:
-        """Process a single item from the queue."""
-        pass
-
-    def _work(self) -> None:
-        """Main work loop consuming queue items."""
-        import queue as queue_module
-        
-        while not self.is_stopped():
-            try:
-                # Use timeout to check stop flag periodically
-                item = self.input_queue.get(timeout=0.1)
-                if item is None:  # Poison pill
-                    break
-                self._process_item(item)
-            except queue_module.Empty:
-                # Timeout - loop to check stop flag
-                pass

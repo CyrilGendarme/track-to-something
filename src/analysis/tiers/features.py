@@ -1,9 +1,8 @@
 """Feature dataclasses for tiered audio analysis.
 
-These dataclasses represent analysis results at three different time scales:
-- Fast: 5-10ms (immediate transient detection)
-- Medium: 20-50ms (smooth energy tracking)
-- Slow: 100-500ms (overall dynamics and tempo)
+These dataclasses are the output contract of the pipeline (GUI + local API):
+- Fast / Medium: produced by the real-time path on every hop (~6ms)
+- Slow: assembled from background jobs (dynamics, BPM, key) as they complete
 """
 
 from __future__ import annotations
@@ -13,7 +12,7 @@ from dataclasses import dataclass
 
 @dataclass
 class FastFeatures:
-    """Very fast features (5-10ms latency).
+    """Real-time transient and beat features (updated every hop).
     
     Designed for immediate visual response: kicks, snares, transients, onsets.
     """
@@ -27,19 +26,26 @@ class FastFeatures:
     is_percussive_peak: bool      # True during kick/snare
     percussive_peak_strength: float  # 0-1 (amplitude of peak)
     
-    # Raw energy in 10ms window
+    # RMS of the newest hop
     raw_energy: float             # 0-1 (immediate amplitude)
     
+    # Beat tracking (phase-locked to the consensus tempo when available)
+    beat_detected: bool = False   # True on the hop where a (predicted) beat falls
+    beat_phase: float = 0.0       # 0 at a beat, rising towards 1 just before the next
+    beat_confidence: float = 0.0  # 0-1 lock quality of the beat tracker
+    tempo_bpm: float | None = None  # Tempo the tracker is currently using
+    predicted_next_beat_s: float | None = None  # Stream time of the next beat
 
 @dataclass
 class MediumFeatures:
-    """Medium-speed features (20-50ms latency).
+    """Smoothed band levels (updated every hop).
     
-    For smooth energy tracking: bass energy, mid energy, spectral movement.
+    Levels are relative to a slowly decaying recent peak per band, so 1.0
+    means "as loud as this band has recently been", not "loudest band".
     """
     timestamp_s: float
     
-    # Frequency band energy (20-50ms window)
+    # Frequency band energy (attack/release smoothed)
     bass_energy: float            # 0-1 (20-250 Hz)
     mid_energy: float             # 0-1 (250-4000 Hz)
     high_energy: float            # 0-1 (4000-20000 Hz)
@@ -51,10 +57,12 @@ class MediumFeatures:
 
 @dataclass
 class SlowFeatures:
-    """Slow features (100-500ms latency).
+    """Big-picture features assembled from background jobs.
     
-    For scene/palette changes: overall energy shape, tempo tracking, tonality analysis.
-    Aggregates all FAST, MEDIUM metrics over longer time window (0.5-2.0s) for big-picture analysis.
+    For scene/palette changes: overall energy shape, tempo, tonality. Levels
+    and dynamics come from the dynamics job (a few-second window), tempo
+    from the multi-method BPM job, key from the key job; transient fields
+    summarize the real-time path over the same window.
     """
     timestamp_s: float
     

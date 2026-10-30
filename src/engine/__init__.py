@@ -1,24 +1,17 @@
-"""Real-time audio analysis engine with multi-threaded pipeline."""
+"""Real-time audio analysis engine.
 
-from .pipeline import AudioPipeline, FeatureCache
-from .base import Worker, QueuedWorker
-from .messages import AudioChunkMessage, AudioFeaturesMessage, RenderingMessage
-from .buffer import CircularAudioBuffer
+Capture thread -> ring buffer -> real-time thread (every hop) + scheduled
+background jobs (dynamics, BPM, key) -> FeatureCache -> GUI / local API.
+"""
+
+from .pipeline import AudioPipeline, FeatureCache, prewarm_job_processes
+from .base import Worker
+from .buffer import RingBuffer
 from .capture_worker import AudioCaptureWorker
-from .processing_worker import AudioProcessingWorker, BeatPredictor
-from .analysis_worker import AnalysisWorker
-from .rendering_worker import RenderingWorker
-from .bpm_worker import BPMAnalysisWorker
+from .realtime import BeatTracker, RealtimeAnalyzer, RealtimeWorker
+from .scheduler import AnalysisJob, JobScheduler, ProcessPoolSpec
 from .performance import PerformanceMonitor, get_performance_monitor, timer
-from src.analysis import (
-    FastAnalyzer,
-    MediumAnalyzer,
-    SlowAnalyzer,
-    MultiWindowAudioAnalyzer,
-    FastFeatures,
-    MediumFeatures,
-    SlowFeatures,
-)
+from src.analysis import FastFeatures, MediumFeatures, SlowFeatures
 from .tiered_rendering import (
     TieredRenderingMessage,
     combine_features,
@@ -34,25 +27,19 @@ from .events import (
 __all__ = [
     "AudioPipeline",
     "FeatureCache",
-    "AudioCaptureWorker",
-    "AudioProcessingWorker",
-    "AnalysisWorker",
-    "RenderingWorker",
-    "BPMAnalysisWorker",
-    "BeatPredictor",
-    "CircularAudioBuffer",
-    "AudioChunkMessage",
-    "AudioFeaturesMessage",
-    "RenderingMessage",
+    "prewarm_job_processes",
     "Worker",
-    "QueuedWorker",
+    "RingBuffer",
+    "AudioCaptureWorker",
+    "RealtimeAnalyzer",
+    "RealtimeWorker",
+    "BeatTracker",
+    "AnalysisJob",
+    "JobScheduler",
+    "ProcessPoolSpec",
     "PerformanceMonitor",
     "get_performance_monitor",
     "timer",
-    "FastAnalyzer",
-    "MediumAnalyzer",
-    "SlowAnalyzer",
-    "MultiWindowAudioAnalyzer",
     "FastFeatures",
     "MediumFeatures",
     "SlowFeatures",
@@ -64,4 +51,3 @@ __all__ = [
     "AudioFrame",
     "merge_frames",
 ]
-

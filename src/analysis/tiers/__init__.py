@@ -1,25 +1,13 @@
-"""Tiered audio analysis - multiple overlapping analysis windows at different time scales.
+"""Feature dataclasses - the output contract of the analysis pipeline.
 
-This module provides:
-- Fast analyzer: 5-10ms latency for immediate transient detection
-- Medium analyzer: 20-50ms latency for smooth energy tracking
-- Slow analyzer: 100-500ms latency for overall dynamics and tempo
-
-Each analyzer produces typed feature objects suitable for different use cases.
+- FastFeatures / MediumFeatures: produced by the real-time path every hop
+- SlowFeatures: assembled from the scheduled background jobs
 """
 
 from .features import FastFeatures, MediumFeatures, SlowFeatures
-from .fast import FastAnalyzer
-from .medium import MediumAnalyzer
-from .slow import SlowAnalyzer
 
 __all__ = [
-    # Feature dataclasses
     "FastFeatures",
     "MediumFeatures",
     "SlowFeatures",
-    # Analyzer classes
-    "FastAnalyzer",
-    "MediumAnalyzer",
-    "SlowAnalyzer",
 ]

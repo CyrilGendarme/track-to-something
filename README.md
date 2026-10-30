@@ -1,143 +1,130 @@
 # MoshPro Spout OBS Glue Script
 
-Real-time audio analysis engine for audio-reactive visualizations, games, and effects.
+Real-time audio analysis for audio-reactive visuals and lighting. It captures a
+live input (mixer, USB interface, or a running application's output), analyzes
+it, and serves the results to the GUI and to other local apps (OBS browser
+sources, lighting controllers, scripts) over HTTP and WebSocket.
 
-## Quick Start
-
-**New here?** Start here: [documentation/01_QUICK_START.md](documentation/01_QUICK_START.md) (10 minutes to first program)
-
-## Documentation
-
-All documentation is in the [documentation/](documentation/) folder:
-
-### Learning Path
-- **[00_README.md](documentation/00_README.md)** - Overview & navigation
-- **[01_QUICK_START.md](documentation/01_QUICK_START.md)** - Getting started (10 min)
-- **[02_ARCHITECTURE.md](documentation/02_ARCHITECTURE.md)** - How it works
-- **[03_EVENTS_VS_SIGNALS.md](documentation/03_EVENTS_VS_SIGNALS.md)** - Core pattern
-
-### Reference
-- **[04_API_REFERENCE.md](documentation/04_API_REFERENCE.md)** - Complete API docs
-- **[10_QUICK_REFERENCE.md](documentation/10_QUICK_REFERENCE.md)** - Cheat sheet
-
-### Detailed Guides
-- **[05_FEATURE_EXTRACTION.md](documentation/05_FEATURE_EXTRACTION.md)** - Audio features explained
-- **[06_TIERED_ANALYSIS.md](documentation/06_TIERED_ANALYSIS.md)** - Multi-window analysis
-- **[07_BEAT_PREDICTION.md](documentation/07_BEAT_PREDICTION.md)** - Zero-latency beat sync
-- **[08_INTEGRATION_GUIDE.md](documentation/08_INTEGRATION_GUIDE.md)** - Framework integration
-- **[09_EXAMPLES.md](documentation/09_EXAMPLES.md)** - 9 working code examples
-
-## Features
-
-- **Three-tier analysis** (5-10ms / 20-50ms / 100-500ms latency)
-- **Event detection** (beats, kicks, snares, onsets, spectral surges)
-- **Continuous signals** (25 normalized audio features)
-- **Beat prediction** (-50ms latency for zero-lag sync)
-- **Efficient** (5-10% CPU, 100KB memory)
-- **Thread-safe** (async-ready)
-
-## Installation
+## Quick start
 
 ```bash
 pip install -r requirements.txt
+python -m src.gui.main_gui
 ```
 
-## Basic Usage
+Pick an audio input, press **Start**, and optionally enable the local API.
+
+## Using the engine from code
 
 ```python
-from src.sources import LiveAudio
+import time
 from src.engine import AudioPipeline
+from src.sources import AudioInputSource
 
-# Create and start pipeline
-pipeline = AudioPipeline(LiveAudio()).start()
+source = AudioInputSource(device=3, sample_rate=48000)   # see list_devices.py
+pipeline = AudioPipeline(
+    audio_source=lambda: source,
+    sample_rate=48000,                                    # must match the source
+    event_callback=lambda kind, data: print(kind, data),  # "onset" / "beat", real-time thread
+).start()
 
-# Main loop
-while True:
-    frame = pipeline.get_frame()
-    if frame:
-        print(f"Bass: {frame.signals.bass_energy:.2f}")
+try:
+    while True:
+        fast, medium, slow = pipeline.feature_cache.get_all()
+        if fast:
+            print(f"bass={medium.bass_energy:.2f} phase={fast.beat_phase:.2f} "
+                  f"bpm={slow.estimated_bpm if slow else None}")
+        time.sleep(0.05)
+finally:
+    pipeline.stop()
+    pipeline.wait()
 ```
 
-See [documentation/01_QUICK_START.md](documentation/01_QUICK_START.md) for full setup guide.
-
-## Project Structure
-
-```
-src/
-  engine/               # Core pipeline orchestration
-    pipeline.py        # Main AudioPipeline orchestrator
-    workers.py         # Worker thread implementations
-    events.py          # Event and signal type definitions
-    tiered_rendering.py
-    __init__.py
-  
-  analysis/             # Audio analysis and feature extraction
-    multi_window_analyzer.py  # FastAnalyzer, MediumAnalyzer, SlowAnalyzer
-    audio_analyzer.py
-    __init__.py
-  
-  sources/              # Audio input sources
-    live_audio.py
-    track_audio.py
-    audio_source.py
-  
-  models/               # Data models
-    rekordbox.py
-  
-  gui/                  # GUI/UI components
-
-examples/              # Working code examples
-  events_vs_signals_example.py
-  predictive_demo.py
-  tiered_analysis_example.py
-  ...
-
-documentation/         # Complete guides (start here!)
-  00_README.md
-  01_QUICK_START.md
-  02_ARCHITECTURE.md
-  ...
-
-tests/                 # Validation tests
-  test_events_signals.py
-  test_audio_sources_analysis.py
-  ...
-requirements.txt
-```
-
-## Examples
-
-See [documentation/09_EXAMPLES.md](documentation/09_EXAMPLES.md) for:
-- Audio visualization
-- Beat detection
-- Real-time waveform monitoring
-- Game integration
-- OSC streaming to OBS
+Any iterable of `src.sources.AudioChunk` works as a source; see
+`examples/example.py` for a file source.
 
 ## Architecture
 
-The engine is built on:
-- **Circular buffer** (5 seconds, shared between tiers)
-- **Three parallel analyzers** (Fast/Medium/Slow windows)
-- **Thread-safe queues** (async-ready)
-- **Events + signals** (clean separation of concerns)
+```
+ audio device ──► AudioCaptureWorker ──► RingBuffer (mono, absolute sample index)
+                  (mono mix, 20 Hz HPF)      │
+                    ┌────────────────────────┴───────────────────────┐
+                    ▼                                                ▼
+        RealtimeWorker — every hop (~6 ms)               JobScheduler — latest-wins
+        onsets, kicks, band levels,                      dynamics     thread   every 0.25 s, 2 s window
+        beat tracker ◄──── consensus tempo ───────────── BPM (numpy)  process  every 1 s,    8 s window
+                    │                                    BPM (librosa) process every 1 s,    8 s window
+                    │                                    key          process  every 2 s,    8 s window
+                    ▼                                                │
+                    └───────────────► FeatureCache ◄─────────────────┘
+                                          │
+                          GUI (polls, 20 Hz)   Local API (push, ≤ 60 Hz)
+```
 
-See [documentation/02_ARCHITECTURE.md](documentation/02_ARCHITECTURE.md) for full details.
+- **One writer, one ring buffer.** The capture thread is the only writer.
+  Every reader asks for an exact span by absolute sample index, so analyses
+  can use any window length, independent of the device block size.
+- **Real-time path** (`src/engine/realtime.py`): sequential and stateful
+  (spectral flux, adaptive thresholds, beat phase), so it runs in exactly one
+  thread. It costs well under a millisecond per hop.
+- **Beat tracking**: a phase-locked loop running at the consensus BPM and
+  nudged by detected kicks. Beats are emitted when the predicted beat time
+  arrives, so they don't carry detection latency, and the tracker keeps
+  going through short breakdowns.
+- **Background jobs** (`src/engine/scheduler.py`): each job declares its
+  cadence, window and executor. If a job is still running, the next tick is
+  skipped, never queued. Heavy jobs run in app-wide worker processes, which
+  the GUI warms up at launch: librosa takes several seconds to load in a
+  fresh process, so it gets its own pool.
+- **FeatureCache** (`src/engine/pipeline.py`) is the only thing consumers
+  read. Tk widgets are updated only from the Tk thread.
 
-## Requirements
+## Outputs
 
-- Python 3.13+
-- NumPy, SciPy, Librosa
-- Platform-specific audio APIs (Windows: PyAudio, Linux: PulseAudio)
+| Group | Updated | Fields (highlights) |
+|---|---|---|
+| `fast` | every hop | `onset_detected`, `onset_strength`, `is_percussive_peak` (kick), `raw_energy`, `beat_detected`, `beat_phase`, `beat_confidence`, `tempo_bpm`, `predicted_next_beat_s` |
+| `medium` | every hop | `bass_energy`, `mid_energy`, `high_energy` (0-1, relative to the band's recent peak), deltas |
+| `slow` | on each job result | levels, `spectral_density_*`, `energy_trend`, `detected_key`, `key_confidence`, `estimated_bpm`, `beat_stability`, band envelopes |
+| `bpm_estimates` | every ~1 s | per-method BPM + confidence, plus the octave-aware consensus |
 
-See [requirements.txt](requirements.txt) for dependencies.
+Timestamps are stream time in seconds (sample count / sample rate).
 
-## License
+## Local API
 
-See project license file.
+Bound to `127.0.0.1:8768` by default (`MOSHPRO_API_HOST`, `MOSHPRO_API_PORT`).
 
----
+- `GET /health`
+- `GET /features`, `/features/fast`, `/features/medium`, `/features/slow`, `/features/bpm`
+- `WS /ws`: sends a snapshot on connect, then whenever the data changes
+  (at most `MOSHPRO_API_MAX_PUSH_HZ` per second, default 60)
 
-**Start learning:** [documentation/01_QUICK_START.md](documentation/01_QUICK_START.md)  
-**API reference:** [documentation/04_API_REFERENCE.md](documentation/04_API_REFERENCE.md)  
-**Examples:** [documentation/09_EXAMPLES.md](documentation/09_EXAMPLES.md)
+## Configuration
+
+All settings live in `src/config/settings.py` and can be overridden with
+`MOSHPRO_*` environment variables, e.g. block and hop sizes, job intervals and
+windows (`MOSHPRO_BPM_INTERVAL_S`, `MOSHPRO_KEY_WINDOW_S`, …), and
+`MOSHPRO_JOBS_USE_PROCESSES=false` to run every job in threads.
+
+## Tests and diagnostics
+
+```bash
+python -m pytest -q                      # synthetic audio, no files or devices needed
+python -m src.diagnostics.worker_debug   # real-time health check on a local file
+```
+
+## Project layout
+
+```
+src/
+  engine/      pipeline, ring buffer, capture, real-time path, job scheduler
+  analysis/    BPM detectors, key detection, dynamics, feature dataclasses
+  sources/     sounddevice input/loopback sources, track file source
+  api/         local HTTP + WebSocket server
+  gui/         Tkinter application
+tests/         pytest suite (synthetic audio helpers in tests/synthetic.py)
+```
+
+> The long-form guides in `documentation/` and `docs/` describe an earlier
+> version of the engine (e.g. `LiveAudio`, `pipeline.get_frame()`) and are
+> out of date; this README reflects the current code.

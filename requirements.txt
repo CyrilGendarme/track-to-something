@@ -1,4 +1,5 @@
 numpy
+scipy
 librosa
 mido
 python-rtmidi
@@ -11,8 +12,6 @@ psutil
 rich>=13.0.0
 pyrekordbox>=0.4.4   # SQLCipher access to Rekordbox 6 master.db
 sqlcipher3           # DBAPI2 driver pulled in by pyrekordbox; imported directly
-mido
-python-rtmidi
 rapidfuzz
 pycaw; sys_platform == 'win32'   # Enumerate running apps' Windows audio sessions for the "Audio Input" dropdown
 aiohttp

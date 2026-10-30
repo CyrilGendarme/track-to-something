@@ -1,68 +1,137 @@
-"""Multi-threaded audio analysis pipeline."""
+"""Audio analysis pipeline: one ring buffer, a real-time path, scheduled jobs.
+
+::
+
+    source ──► AudioCaptureWorker ──► RingBuffer (mono, absolute sample index)
+                                        │
+                ┌───────────────────────┴────────────────────────┐
+                ▼                                                ▼
+        RealtimeWorker (every hop)                     JobScheduler
+        onsets, kicks, band levels,                    dynamics  (thread,  0.25s / 2s)
+        beat tracker ◄── tempo prior ───────────────── BPM x2    (process, 1s / 8s)
+                │                                      key       (process, 2s / 8s)
+                ▼                                                │
+                └──────────────► FeatureCache ◄──────────────────┘
+                                     │
+                              GUI (polls) / local API (push)
+"""
 
 from __future__ import annotations
 
 import logging
 import threading
-from queue import Queue
 from typing import Callable, Optional
 
-from src.config import (
-    DEFAULT_SAMPLE_RATE,
-    BUFFER_CAPACITY_SECONDS,
-    NUM_PROCESSING_WORKERS,
-    OUTPUT_QUEUE_MAXSIZE,
+import numpy as np
+
+from src.analysis.bpm_detectors import (
+    BPMEstimate,
+    analyze_librosa_methods,
+    analyze_signal_methods,
+    consensus_bpm,
 )
-from src.analysis.bpm_detectors import BPMEstimate
+from src.analysis.dynamics import DynamicsResult, analyze_dynamics
+from src.analysis.key_detection import KeyEstimate, KeySmoother, detect_key
 from src.analysis.tiers.features import FastFeatures, MediumFeatures, SlowFeatures
-from src.analysis.multi_window_analyzer import MultiWindowAudioAnalyzer
-from .buffer import CircularAudioBuffer
+from src.config import (
+    BPM_INTERVAL_S,
+    BPM_WINDOW_S,
+    BUFFER_CAPACITY_SECONDS,
+    DEFAULT_SAMPLE_RATE,
+    DYNAMICS_INTERVAL_S,
+    DYNAMICS_WINDOW_S,
+    JOBS_USE_PROCESSES,
+    KEY_HISTORY_SIZE,
+    KEY_INTERVAL_S,
+    KEY_WINDOW_S,
+)
+from .buffer import RingBuffer
 from .capture_worker import AudioCaptureWorker
-from .processing_worker import AudioProcessingWorker
-from .analysis_worker import AnalysisWorker
-from .rendering_worker import RenderingWorker
-from .bpm_worker import BPMAnalysisWorker
+from .realtime import RealtimeWorker
+from .scheduler import AnalysisJob, JobResult, JobScheduler, ProcessPoolSpec, shared_process_pool
 
 logger = logging.getLogger(__name__)
 
+# The beat tracker only follows the consensus tempo above this confidence.
+TEMPO_PRIOR_MIN_CONFIDENCE = 0.3
+# Extra ring buffer capacity beyond the longest job window.
+BUFFER_HEADROOM_S = 2.0
+
+
+def _warm_up_noise() -> np.ndarray:
+    return np.random.default_rng(0).normal(0.0, 0.1, 3 * DEFAULT_SAMPLE_RATE).astype(np.float32)
+
+
+def warm_up_signal_worker() -> None:
+    """Initializer for the fast pool: load the numpy/scipy code paths."""
+    analyze_signal_methods(_warm_up_noise(), DEFAULT_SAMPLE_RATE)
+    detect_key(_warm_up_noise(), DEFAULT_SAMPLE_RATE)
+
+
+def warm_up_librosa_worker() -> None:
+    """Initializer for the librosa pool: pay librosa's import cost (seconds)."""
+    analyze_librosa_methods(_warm_up_noise(), DEFAULT_SAMPLE_RATE)
+
+
+# Fast numpy/scipy jobs (key, signal BPM methods) and the librosa job get
+# separate pools, so librosa's slow first import never blocks the others.
+SIGNAL_POOL = ProcessPoolSpec("signal", max_workers=2, initializer=warm_up_signal_worker)
+LIBROSA_POOL = ProcessPoolSpec("librosa", max_workers=1, initializer=warm_up_librosa_worker)
+
+
+def prewarm_job_processes() -> None:
+    """Spawn and warm up the shared job processes ahead of the first pipeline.
+
+    Call this when the application starts (the GUI does) so BPM and key
+    estimates arrive within seconds of starting analysis.
+    """
+    shared_process_pool(SIGNAL_POOL)
+    shared_process_pool(LIBROSA_POOL)
+
 
 class FeatureCache:
-    """Thread-safe cache for latest audio features (all three tiers).
-    
-    Supports event-driven broadcasting: when features are updated, registered
-    callbacks are invoked immediately for real-time WebSocket push.
+    """Thread-safe store of the latest features (the only thing consumers read).
+
+    Supports event-driven broadcasting: when anything is updated, the
+    registered callback is invoked (from the producing thread). The callback
+    must be cheap - the real-time path calls it on every hop.
     """
-    
+
     def __init__(self):
         """Initialize feature cache."""
         self.fast: Optional[FastFeatures] = None
         self.medium: Optional[MediumFeatures] = None
         self.slow: Optional[SlowFeatures] = None
         self.bpm_estimates: dict[str, BPMEstimate] = {}
+        self.version = 0
         self.lock = threading.Lock()
         self._on_update_callback: Callable[[], None] | None = None
-    
+
     def set_update_callback(self, callback: Callable[[], None] | None) -> None:
         """Register a callback to be invoked when features are updated.
-        
+
         Args:
             callback: Callable with no arguments, or None to unregister
         """
         with self.lock:
             self._on_update_callback = callback
-    
+
+    def _notify(self, callback: Callable[[], None] | None) -> None:
+        # Invoked outside the lock to avoid blocking producers
+        if callback is not None:
+            try:
+                callback()
+            except Exception as exc:  # noqa: BLE001
+                logger.error(f"[FeatureCache] Callback error: {type(exc).__name__}: {exc}", exc_info=True)
+
     def update(self, fast: Optional[FastFeatures] = None, medium: Optional[MediumFeatures] = None, slow: Optional[SlowFeatures] = None) -> None:
-        """Update cached features.
-        
-        When features are updated, the registered callback (if any) is invoked
-        to trigger immediate broadcast to WebSocket clients.
-        
+        """Update cached features and notify the registered callback.
+
         Args:
             fast: FastFeatures or None
             medium: MediumFeatures or None
             slow: SlowFeatures or None
         """
-        callback_to_invoke = None
         with self.lock:
             if fast is not None:
                 self.fast = fast
@@ -70,29 +139,27 @@ class FeatureCache:
                 self.medium = medium
             if slow is not None:
                 self.slow = slow
-            callback_to_invoke = self._on_update_callback
-        
-        # Invoke callback outside the lock to avoid blocking the update
-        if callback_to_invoke is not None:
-            try:
-                callback_to_invoke()
-            except Exception as exc:  # noqa: BLE001
-                logger.error(f"[FeatureCache] Callback error: {type(exc).__name__}: {exc}", exc_info=True)
-    
+            self.version += 1
+            callback = self._on_update_callback
+        self._notify(callback)
+
     def get_all(self) -> tuple[Optional[FastFeatures], Optional[MediumFeatures], Optional[SlowFeatures]]:
         """Get all cached features.
-        
+
         Returns:
             Tuple of (fast, medium, slow) features
         """
         with self.lock:
             return self.fast, self.medium, self.slow
-    
+
     def update_bpm_estimates(self, estimates: dict[str, BPMEstimate]) -> None:
         """Update the latest per-method BPM estimates."""
         with self.lock:
-            self.bpm_estimates = estimates
-    
+            self.bpm_estimates = dict(estimates)
+            self.version += 1
+            callback = self._on_update_callback
+        self._notify(callback)
+
     def get_bpm_estimates(self) -> dict[str, BPMEstimate]:
         """Get the latest per-method BPM estimates."""
         with self.lock:
@@ -100,170 +167,204 @@ class FeatureCache:
 
 
 class AudioPipeline:
-    """Orchestrates multi-threaded audio analysis pipeline.
-    
-    Architecture:
-    - AudioCaptureWorker: Captures audio chunks → CircularAudioBuffer + Capture Queue
-    - AudioProcessingWorker(s): Reads Capture Queue → Processes audio features → Features Queue
-    - AnalysisWorker: Reads Features Queue → Detects events → Rendering Queue
-    - RenderingWorker: Reads Rendering Queue → Updates display/output
-    """
+    """Orchestrates capture, the real-time path and the background jobs."""
 
     def __init__(
         self,
         audio_source: Callable,
-        n_processing_workers: int = NUM_PROCESSING_WORKERS,
         buffer_capacity_s: float = BUFFER_CAPACITY_SECONDS,
         sample_rate: int = DEFAULT_SAMPLE_RATE,
         event_callback: Callable[[str, dict], None] | None = None,
         feature_cache: "FeatureCache | None" = None,
+        use_processes: bool = JOBS_USE_PROCESSES,
     ):
         """Initialize audio pipeline.
-        
+
         Args:
             audio_source: Callable that returns an iterable of AudioChunk
-            n_processing_workers: Number of parallel processing workers (default from config)
-            buffer_capacity_s: Circular buffer capacity in seconds (default from config)
-            sample_rate: Audio sample rate in Hz (default from config)
-            event_callback: Callback for detected events (event_type, data)
+                (the returned object may have a ``close()`` method, which
+                is called on stop to unblock a waiting device read)
+            buffer_capacity_s: Minimum ring buffer capacity in seconds (it is
+                enlarged to fit the longest job window)
+            sample_rate: Audio sample rate in Hz; the source must match it
+            event_callback: Called from the real-time thread for "onset" and
+                "beat" events as ``(event_type, data)``. Must be cheap and
+                thread-safe (GUI code must marshal to its own thread).
             feature_cache: Optional externally-owned FeatureCache (e.g. so a
                 local API server can keep serving the latest data across
                 repeated pipeline start/stop cycles). A new one is created
                 if omitted.
+            use_processes: Run the BPM and key jobs in worker processes.
         """
-        self.audio_source = audio_source
-        self.buffer_capacity_s = buffer_capacity_s
         self.sample_rate = sample_rate
-        
-        # Communication queues
-        self.capture_queue: Queue = Queue(maxsize=OUTPUT_QUEUE_MAXSIZE)
-        self.features_queue: Queue = Queue(maxsize=OUTPUT_QUEUE_MAXSIZE)
-        self.rendering_queue: Queue = Queue(maxsize=OUTPUT_QUEUE_MAXSIZE)
-        
-        # Shared circular buffer
-        self.audio_buffer = CircularAudioBuffer(capacity_s=buffer_capacity_s, sample_rate=sample_rate)
-        
-        # Feature cache for GUI access (thread-safe)
         self.feature_cache = feature_cache if feature_cache is not None else FeatureCache()
-        
-        # Shared multi-window analyzer (CRITICAL: one instance for all workers!)
-        # This ensures all parallel workers feed beats into the SAME tempo tracker
-        # so they accumulate for BPM calculation
-        self.multi_analyzer = MultiWindowAudioAnalyzer(sample_rate=sample_rate)
-        logger.info(f"[Pipeline] Created shared MultiWindowAnalyzer for all {n_processing_workers} workers")
-        
-        # Worker threads
+
+        longest_window_s = max(DYNAMICS_WINDOW_S, BPM_WINDOW_S, KEY_WINDOW_S)
+        capacity_s = max(buffer_capacity_s, longest_window_s + BUFFER_HEADROOM_S)
+        self.audio_buffer = RingBuffer(int(capacity_s * sample_rate), sample_rate)
+
+        # Latest background results, combined into SlowFeatures on each update
+        self._slow_lock = threading.Lock()
+        self._dynamics: DynamicsResult | None = None
+        self._dynamics_window: tuple[float, float] = (0.0, 0.0)
+        self._key: tuple[str | None, float] = (None, 0.0)
+        self._key_smoother = KeySmoother(KEY_HISTORY_SIZE)
+        self._tempo: tuple[float | None, float] = (None, 0.0)
+        self._bpm_estimates: dict[str, BPMEstimate] = {}
+
         self.capture_worker = AudioCaptureWorker(
             "Capture",
-            audio_source=self.audio_source,
-            output_queue=self.capture_queue,
+            audio_source=audio_source,
             buffer=self.audio_buffer,
             daemon=True,
         )
-        
-        self.processing_workers = [
-            AudioProcessingWorker(
-                f"Processing-{i}",
-                input_queue=self.capture_queue,
-                output_queue=self.features_queue,
-                feature_cache=self.feature_cache,
-                multi_analyzer=self.multi_analyzer,  # SHARED across all workers!
-                daemon=True,
-            )
-            for i in range(n_processing_workers)
-        ]
-        
-        self.analysis_worker = AnalysisWorker(
-            "Analysis",
-            input_queue=self.features_queue,
-            output_queue=self.rendering_queue,
+        self.realtime_worker = RealtimeWorker(
+            buffer=self.audio_buffer,
+            on_hop=lambda fast, medium: self.feature_cache.update(fast=fast, medium=medium),
+            tempo_prior=self._tempo_prior,
             event_callback=event_callback,
-            daemon=True,
         )
-        
-        self.rendering_worker = RenderingWorker(
-            "Rendering",
-            input_queue=self.rendering_queue,
-            daemon=True,
-        )
-        
-        # Slow, parallel multi-method BPM analysis (separate cadence from the
-        # per-chunk onset-based estimate; pulls its own long audio window)
-        self.bpm_worker = BPMAnalysisWorker(
-            multi_analyzer=self.multi_analyzer,
-            on_result=self.feature_cache.update_bpm_estimates,
-            sample_rate=sample_rate,
-            daemon=True,
-        )
-        
+        signal_pool = SIGNAL_POOL if use_processes else None
+        librosa_pool = LIBROSA_POOL if use_processes else None
+        self.jobs = [
+            AnalysisJob("dynamics", analyze_dynamics, DYNAMICS_INTERVAL_S, DYNAMICS_WINDOW_S,
+                        self._on_dynamics, min_window_s=0.5),
+            AnalysisJob("bpm", analyze_signal_methods, BPM_INTERVAL_S, BPM_WINDOW_S,
+                        self._on_bpm, process_pool=signal_pool, min_window_s=2.0),
+            AnalysisJob("bpm_librosa", analyze_librosa_methods, BPM_INTERVAL_S, BPM_WINDOW_S,
+                        self._on_bpm, process_pool=librosa_pool, min_window_s=2.0),
+            AnalysisJob("key", detect_key, KEY_INTERVAL_S, KEY_WINDOW_S,
+                        self._on_key, process_pool=signal_pool, min_window_s=2.0),
+        ]
+        self.scheduler = JobScheduler(self.audio_buffer, self.jobs)
         self._running = False
 
-    def start(self) -> None:
+    # ── job results ───────────────────────────────────────────────────────
+
+    def _tempo_prior(self) -> float | None:
+        bpm, confidence = self._tempo
+        return bpm if confidence >= TEMPO_PRIOR_MIN_CONFIDENCE else None
+
+    def _on_dynamics(self, result: JobResult) -> None:
+        with self._slow_lock:
+            self._dynamics = result.value
+            self._dynamics_window = (result.window_start_s, result.window_end_s)
+        self._publish_slow()
+
+    def _on_bpm(self, result: JobResult) -> None:
+        # Both BPM jobs report a subset of the methods; merge them
+        with self._slow_lock:
+            self._bpm_estimates.update(result.value)
+            estimates = dict(self._bpm_estimates)
+        self._tempo = consensus_bpm(estimates)
+        self.feature_cache.update_bpm_estimates(estimates)
+        self._publish_slow()
+
+    def _on_key(self, result: JobResult) -> None:
+        estimate: KeyEstimate = result.value
+        with self._slow_lock:
+            self._key = self._key_smoother.update(estimate)
+        self._publish_slow()
+
+    def _publish_slow(self) -> None:
+        """Combine the latest job results into SlowFeatures."""
+        with self._slow_lock:
+            dyn = self._dynamics
+            start_s, end_s = self._dynamics_window
+            key, key_confidence = self._key
+        if dyn is None:
+            return
+        bpm, bpm_confidence = self._tempo
+
+        events = self.realtime_worker.recent_events(start_s)
+        beat_confidences = [e.confidence for e in events if e.kind == "beat"]
+
+        slow = SlowFeatures(
+            timestamp_s=end_s,
+            overall_amplitude=dyn.overall_amplitude,
+            rms=dyn.rms,
+            peak=dyn.peak,
+            bass_energy=float(np.mean(dyn.band_bass_envelope)),
+            mid_energy=float(np.mean(dyn.band_mid_envelope)),
+            high_energy=float(np.mean(dyn.band_high_envelope)),
+            spectral_density_low=dyn.spectral_density_low,
+            spectral_density_mid=dyn.spectral_density_mid,
+            spectral_density_high=dyn.spectral_density_high,
+            detected_key=key,
+            key_confidence=key_confidence,
+            onset_detected=any(e.kind == "onset" for e in events),
+            beat_detected=bool(beat_confidences),
+            beat_confidence=float(np.mean(beat_confidences)) if beat_confidences else 0.0,
+            estimated_bpm=bpm,
+            beat_stability=bpm_confidence,
+            average_energy=dyn.rms,
+            energy_variance=dyn.energy_variance,
+            energy_trend=dyn.energy_trend,
+            band_bass_envelope=dyn.band_bass_envelope,
+            band_mid_envelope=dyn.band_mid_envelope,
+            band_high_envelope=dyn.band_high_envelope,
+        )
+        self.feature_cache.update(slow=slow)
+
+    # ── lifecycle ─────────────────────────────────────────────────────────
+
+    def start(self) -> "AudioPipeline":
         """Start all worker threads."""
         if self._running:
             logger.warning("Pipeline already running")
-            return
-        
-        logger.info("Starting audio pipeline")
+            return self
+        logger.info("Starting audio pipeline (ring buffer %.1fs @ %d Hz)",
+                    self.audio_buffer.capacity / self.sample_rate, self.sample_rate)
         self._running = True
-        
         self.capture_worker.start()
-        for worker in self.processing_workers:
-            worker.start()
-        self.analysis_worker.start()
-        self.rendering_worker.start()
-        self.bpm_worker.start()
+        self.realtime_worker.start()
+        self.scheduler.start()
+        return self
 
     def stop(self) -> None:
-        """Stop all worker threads gracefully."""
+        """Stop all workers and close the audio source."""
         if not self._running:
-            logger.warning("Pipeline not running")
             return
-        
         logger.info("Stopping audio pipeline")
         self._running = False
-        
-        # Signal all workers to stop
         self.capture_worker.stop()
-        for worker in self.processing_workers:
-            worker.stop()
-        self.analysis_worker.stop()
-        self.rendering_worker.stop()
-        self.bpm_worker.stop()
+        self.realtime_worker.stop()
+        self.scheduler.stop()
 
     def wait(self, timeout: float | None = None) -> None:
-        """Wait for all workers to complete.
-        
+        """Wait until the source is exhausted and fully analyzed (or stopped).
+
+        Re-raises an error from the capture thread (e.g. a device failure).
+
         Args:
-            timeout: Maximum time to wait in seconds
+            timeout: Maximum time to wait per worker in seconds
         """
         self.capture_worker.join(timeout=timeout)
-        for worker in self.processing_workers:
-            worker.join(timeout=timeout)
-        self.analysis_worker.join(timeout=timeout)
-        self.rendering_worker.join(timeout=timeout)
-        self.bpm_worker.join(timeout=timeout)
+        self.realtime_worker.join(timeout=timeout)
+        if not self.realtime_worker.is_alive():
+            # Source finished: let in-flight jobs publish their final
+            # results, then stop scheduling (there is no new audio).
+            self.scheduler.finish(timeout=timeout)
+            self._running = False
+        else:
+            self.scheduler.join(timeout=timeout)
 
     def is_running(self) -> bool:
-        """Check if pipeline is running."""
-        return self._running and all([
-            self.capture_worker.is_alive(),
-            all(w.is_alive() for w in self.processing_workers),
-            self.analysis_worker.is_alive(),
-            self.rendering_worker.is_alive(),
-        ])
+        """True while audio is being captured or analyzed."""
+        return self._running and (self.capture_worker.is_alive() or self.realtime_worker.is_alive())
 
     def get_events(self) -> list[tuple[float, str]]:
-        """Get list of detected events."""
-        return list(self.analysis_worker.event_history)
+        """Recent (timestamp_s, kind) onset and beat events."""
+        return [(e.timestamp_s, e.kind) for e in self.realtime_worker.recent_events(0.0) if e.kind != "kick"]
 
-    def get_latest_audio(self, duration_s: float = 2.0) -> bytes:
-        """Get latest audio data from circular buffer.
-        
+    def get_latest_audio(self, duration_s: float = 2.0) -> np.ndarray:
+        """Get the latest mono audio from the ring buffer.
+
         Args:
             duration_s: Duration to retrieve in seconds
-            
+
         Returns:
-            Audio samples as numpy array
+            Mono float32 samples
         """
-        return self.audio_buffer.read_latest(duration_s, self.sample_rate)
+        samples, _ = self.audio_buffer.read_latest(int(duration_s * self.sample_rate))
+        return samples

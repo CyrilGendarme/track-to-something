@@ -1,83 +1,106 @@
-"""Thread-safe circular audio buffer for streaming audio."""
+"""Thread-safe mono ring buffer addressed by absolute sample index."""
 
 from __future__ import annotations
 
 import threading
-import time
 
 import numpy as np
 
-from src.config import DEFAULT_SAMPLE_RATE, BUFFER_CAPACITY_SECONDS
-from src.engine.performance import get_performance_monitor
 
+class RingBuffer:
+    """Single-writer / multi-reader ring buffer for mono float32 audio.
 
-class CircularAudioBuffer:
-    """Thread-safe circular buffer for audio chunks."""
+    Positions are absolute sample counts since the stream started
+    (``total_written``), so readers can ask for an exact span, detect that
+    they fell behind (the span was overwritten), and tag their results with
+    the samples they covered.
+    """
 
-    def __init__(self, capacity_s: float = BUFFER_CAPACITY_SECONDS, sample_rate: int = DEFAULT_SAMPLE_RATE):
-        """Initialize circular buffer.
-        
-        Args:
-            capacity_s: Buffer capacity in seconds
-            sample_rate: Sample rate in Hz
+    def __init__(self, capacity_samples: int, sample_rate: int):
+        if capacity_samples <= 0:
+            raise ValueError("capacity_samples must be positive")
+        self.capacity = int(capacity_samples)
+        self.sample_rate = int(sample_rate)
+        self._data = np.zeros(self.capacity, dtype=np.float32)
+        self._total_written = 0
+        self._closed = False
+        self._cond = threading.Condition(threading.Lock())
+
+    @property
+    def total_written(self) -> int:
+        with self._cond:
+            return self._total_written
+
+    @property
+    def closed(self) -> bool:
+        with self._cond:
+            return self._closed
+
+    def write(self, samples: np.ndarray) -> None:
+        """Append mono samples and wake up readers waiting for new data."""
+        samples = np.asarray(samples, dtype=np.float32).reshape(-1)
+        n = samples.size
+        if n == 0:
+            return
+        if n > self.capacity:
+            samples = samples[-self.capacity:]
+        with self._cond:
+            start = self._total_written % self.capacity
+            m = samples.size
+            first = min(m, self.capacity - start)
+            self._data[start:start + first] = samples[:first]
+            if first < m:
+                self._data[:m - first] = samples[first:]
+            self._total_written += n
+            self._cond.notify_all()
+
+    def close(self) -> None:
+        """Mark the stream as finished (wakes up waiting readers)."""
+        with self._cond:
+            self._closed = True
+            self._cond.notify_all()
+
+    def wait_for(self, position: int, timeout: float) -> int:
+        """Block until ``total_written >= position``, the buffer is closed, or timeout.
+
+        Returns the current ``total_written``.
         """
-        self.capacity_samples = int(capacity_s * sample_rate)
-        self.buffer = np.zeros((self.capacity_samples, 2), dtype=np.float32)
-        self.write_pos = 0
-        self.lock = threading.RLock()
+        with self._cond:
+            self._cond.wait_for(lambda: self._total_written >= position or self._closed, timeout=timeout)
+            return self._total_written
 
-    def write(self, samples: np.ndarray) -> int:
-        """Write audio samples to buffer.
-        
-        Args:
-            samples: Audio data (n_samples, n_channels) in float32
-            
-        Returns:
-            Number of samples written
-        """
-        perf = get_performance_monitor()
-        with perf.timing_context("buffer:write"):
-            with self.lock:
-                n = len(samples)
-                remaining = self.capacity_samples - self.write_pos
-                
-                if n <= remaining:
-                    # Simple case: fits without wrapping
-                    self.buffer[self.write_pos:self.write_pos + n] = samples
-                    self.write_pos += n
-                else:
-                    # Wrap around
-                    self.buffer[self.write_pos:] = samples[:remaining]
-                    self.buffer[:n - remaining] = samples[remaining:]
-                    self.write_pos = n - remaining
-                
-                # Wrap write position
-                self.write_pos %= self.capacity_samples
-                return n
+    def read(self, end: int, n: int) -> np.ndarray | None:
+        """Return the ``n`` samples ending at absolute position ``end``.
 
-    def read_latest(self, duration_s: float, sample_rate: int) -> np.ndarray:
-        """Read most recent samples.
-        
-        Args:
-            duration_s: Duration to read in seconds
-            sample_rate: Sample rate in Hz
-            
-        Returns:
-            Audio samples (n_samples, 2) in float32
+        Returns None if part of that span has already been overwritten or has
+        not been written yet. Samples before the stream start read as zeros.
         """
-        perf = get_performance_monitor()
-        with perf.timing_context("buffer:read_latest"):
-            n_samples = int(duration_s * sample_rate)
-            n_samples = min(n_samples, self.capacity_samples)
-            
-            with self.lock:
-                start = (self.write_pos - n_samples) % self.capacity_samples
-                
-                if start + n_samples <= self.capacity_samples:
-                    # No wrap
-                    return self.buffer[start:start + n_samples].copy()
-                else:
-                    # Wrapped read
-                    part1 = self.buffer[start:]
-                    part2 = self.buffer[:n_samples - len(part1)]
-                    return np.vstack([part1, part2])
+        if n <= 0:
+            return np.zeros(0, dtype=np.float32)
+        with self._cond:
+            start = end - n
+            pad = max(0, -start)
+            start = max(0, start)
+            if end > self._total_written or start < self._total_written - self.capacity:
+                return None
+            out = np.empty(end - start, dtype=np.float32)
+            i0 = start % self.capacity
+            first = min(out.size, self.capacity - i0)
+            out[:first] = self._data[i0:i0 + first]
+            if first < out.size:
+                out[first:] = self._data[:out.size - first]
+        if pad:
+            out = np.concatenate([np.zeros(pad, dtype=np.float32), out])
+        return out
+
+    def read_latest(self, n: int) -> tuple[np.ndarray, int]:
+        """Return up to the latest ``n`` samples and the absolute end position."""
+        with self._cond:
+            end = self._total_written
+        n = min(n, self.capacity, end)
+        data = self.read(end, n)
+        if data is None:  # overwritten between the two locks; retry once at the new end
+            with self._cond:
+                end = self._total_written
+            data = self.read(end, min(n, end))
+        return (data if data is not None else np.zeros(0, dtype=np.float32)), end
