@@ -88,25 +88,37 @@ def _drive(tracker: BeatTracker, kicks: list[float], duration: float, prior: flo
     t = 0.0
     while t < duration:
         t += hop
-        kick = next_kick is not None and t >= next_kick
-        if kick:
-            next_kick = next(kick_iter, None)
-        state = tracker.update(t, kick, prior)
+        kick_time = None
+        if next_kick is not None and t >= next_kick:
+            kick_time, next_kick = next_kick, next(kick_iter, None)
+        state = tracker.update(t, kick_time, prior)
         states.append(state)
         if state.beat:
-            beats.append(t)
+            beats.append(state.beat_time_s)
     return beats, states
+
+
+def _grid_errors(beats: list[float], first: float, period: float, after: float) -> list[float]:
+    return [((b - first + period / 2) % period) - period / 2 for b in beats if b > after]
 
 
 def test_beat_tracker_locks_to_prior_and_corrects_phase() -> None:
     period = 0.5
     kicks = [0.13 + i * period for i in range(20)]
     beats, states = _drive(BeatTracker(), kicks, 10.0, prior=120.0)
-    late = [b for b in beats if b > 5.0]
-    errors = [((b - 0.13 + period / 2) % period) - period / 2 for b in late]
-    assert max(abs(e) for e in errors) < 0.011  # within ~2 hops
+    assert max(abs(e) for e in _grid_errors(beats, 0.13, period, 5.0)) < 0.002
     assert states[-1].confidence > 0.8
     assert states[-1].tempo_bpm == pytest.approx(120.0)
+
+
+def test_beat_tracker_corrects_a_slightly_wrong_tempo_prior() -> None:
+    """Prior 127.5 BPM, kicks at 128: the learned offset removes the lag."""
+    period = 60.0 / 128.0
+    kicks = [0.1 + i * period for i in range(60)]
+    beats, states = _drive(BeatTracker(), kicks, 28.0, prior=127.5)
+    errors = _grid_errors(beats, 0.1, period, 20.0)
+    assert max(abs(e) for e in errors) < 0.002
+    assert states[-1].tempo_bpm == pytest.approx(128.0, abs=0.1)
 
 
 def test_beat_tracker_flywheel_survives_short_breakdown_then_releases() -> None:

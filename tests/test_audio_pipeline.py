@@ -54,12 +54,13 @@ def test_pipeline_tracks_tempo_beats_and_key() -> None:
     assert fast.tempo_bpm == pytest.approx(BPM, abs=2.0)
     assert fast.beat_confidence > 0.5
 
-    # Once locked, emitted beats sit on the true beat grid (within ~20ms)
+    # Once locked, emitted beats sit on the true beat grid (kick attack times
+    # are localized within the hop, so this is well under one hop)
     period = 60.0 / BPM
     late_beats = [d["timestamp"] for kind, d in events if kind == "beat" and d["timestamp"] > 6.0]
     assert len(late_beats) >= 10
     errors = [((b + period / 2) % period) - period / 2 for b in late_beats]
-    assert max(abs(e) for e in errors) < 0.02
+    assert max(abs(e) for e in errors) < 0.006
 
 
 def test_pipeline_jobs_run_in_worker_processes() -> None:

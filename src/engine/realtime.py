@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 import numpy as np
+from scipy import signal as scipy_signal
 
 from src.analysis.tiers.features import FastFeatures, MediumFeatures
 from src.config import (
@@ -47,6 +48,10 @@ LEVEL_ATTACK_S = 0.01
 LEVEL_RELEASE_S = 0.15
 # Absolute floor for band normalization (avoid amplifying silence to 1.0).
 LEVEL_FLOOR = 1e-3
+# Kick attack localization: search the bass envelope of the last few hops
+# for where it first rises this fraction of the way to its peak.
+ATTACK_SEARCH_HOPS = 3
+ATTACK_FRACTION = 0.25
 
 
 @dataclass(frozen=True)
@@ -57,6 +62,7 @@ class HopResult:
     medium: MediumFeatures
     onset: bool
     kick: bool
+    kick_time_s: float | None = None  # estimated attack time (sub-hop), when kick
 
 
 class _AdaptiveThreshold:
@@ -113,6 +119,29 @@ class RealtimeAnalyzer:
         self._band_peak = {name: LEVEL_FLOOR for name in self.band_masks}
         self._band_level = {name: 0.0 for name in self.band_masks}
         self._prev_overall = 0.0
+
+        # Low-pass for kick attack localization (only run on kick hops)
+        self._kick_lowpass = scipy_signal.butter(2, FREQ_BAND_BASS_MAX, btype="low", fs=sample_rate, output="sos")
+        self._attack_span = min(fft_size, ATTACK_SEARCH_HOPS * hop_size)
+
+    def _locate_kick_attack(self, frame: np.ndarray, timestamp_s: float) -> float:
+        """Estimate when the kick started within the last few hops.
+
+        A kick is only *detected* at the end of a hop, several ms after its
+        attack (window overlap + hop quantization). Its start is taken as the
+        point where the bass amplitude envelope first climbs a fraction of the
+        way from its pre-kick level to its peak.
+        """
+        bass = scipy_signal.sosfilt(self._kick_lowpass, frame.astype(np.float64))
+        env = np.abs(scipy_signal.hilbert(bass))[-self._attack_span:]
+        peak_idx = int(np.argmax(env))
+        if peak_idx == 0:
+            return timestamp_s
+        baseline = float(env[:peak_idx].min())
+        level = baseline + ATTACK_FRACTION * (float(env[peak_idx]) - baseline)
+        last_low = np.flatnonzero(env[:peak_idx] < level)
+        start_idx = int(last_low[-1]) + 1 if last_low.size else 0
+        return timestamp_s - (self._attack_span - start_idx) / self.sample_rate
 
     def process(self, frame: np.ndarray, timestamp_s: float) -> HopResult:
         """Analyze one frame (``fft_size`` samples ending at ``timestamp_s``)."""
@@ -183,7 +212,8 @@ class RealtimeAnalyzer:
             overall_energy_delta=overall - self._prev_overall,
         )
         self._prev_overall = overall
-        return HopResult(fast=fast, medium=medium, onset=onset, kick=kick)
+        kick_time_s = self._locate_kick_attack(frame, timestamp_s) if kick else None
+        return HopResult(fast=fast, medium=medium, onset=onset, kick=kick, kick_time_s=kick_time_s)
 
 
 @dataclass(frozen=True)
@@ -195,25 +225,39 @@ class BeatState:
     confidence: float
     tempo_bpm: float | None
     next_beat_s: float | None
+    beat_time_s: float | None = None  # exact predicted time of the emitted beat
 
 
 class BeatTracker:
     """Phase-locked loop: a flywheel at the tempo prior, nudged by kicks.
 
-    Beats are emitted when the flywheel crosses the predicted beat time, not
-    when a kick is detected, so consumers get beats on time (no detection
-    latency) as long as the tracker is locked.
+    Each on-beat kick corrects both the phase (``PHASE_GAIN``) and a small
+    tempo offset on top of the prior (``TEMPO_GAIN``, an alpha-beta / type-2
+    loop), so a prior that is slightly off (e.g. 127.5 vs 128 BPM) does not
+    leave a constant lag behind the kicks.
+
+    Beats are emitted from the predicted beat times, not when a kick is
+    detected, so consumers get beats on time (no detection latency) as long
+    as the tracker is locked. A beat is emitted on the update whose time is
+    within ``lookahead_s`` of it (use half a hop so hop quantization
+    averages out), and carries its exact predicted time.
     """
 
     MIN_BPM = 60.0
     MAX_BPM = 200.0
     PHASE_GAIN = 0.3        # fraction of the timing error corrected per matching kick
+    TEMPO_GAIN = 0.05       # fraction of the timing error added to the period per matching kick
+    MAX_TEMPO_CORRECTION = 0.02  # the learned period offset stays within +-2% of the prior
+    PRIOR_RESET_CHANGE = 0.02    # a prior moving more than 2% discards the learned offset
     MATCH_WINDOW = 0.2      # kick within +-20% of a period counts as on-beat
     LOCK_GAIN = 0.15        # EMA rate of the lock quality
     LOST_AFTER_S = 8.0      # no matching kicks for this long -> stop emitting beats
     MISS_DECAY = 0.9        # lock multiplier for each predicted beat without a kick
 
-    def __init__(self):
+    def __init__(self, lookahead_s: float = 0.0):
+        self.lookahead_s = lookahead_s
+        self._base_period: float | None = None  # from the tempo prior / kick intervals
+        self._period_offset = 0.0               # learned correction on top of it
         self._period: float | None = None
         self._last_beat: float | None = None
         self._next_beat: float | None = None
@@ -221,10 +265,18 @@ class BeatTracker:
         self._last_match_s = -math.inf
         self._kick_times: deque[float] = deque(maxlen=12)
 
-    def _set_period(self, period: float) -> None:
-        self._period = period
+    def _set_base_period(self, base: float) -> None:
+        if self._base_period is None or abs(base - self._base_period) > self.PRIOR_RESET_CHANGE * self._base_period:
+            self._period_offset = 0.0
+        self._base_period = base
+        self._apply_period()
+
+    def _apply_period(self) -> None:
+        limit = self.MAX_TEMPO_CORRECTION * self._base_period
+        self._period_offset = min(max(self._period_offset, -limit), limit)
+        self._period = self._base_period + self._period_offset
         if self._last_beat is not None:
-            self._next_beat = self._last_beat + period
+            self._next_beat = self._last_beat + self._period
 
     def _fallback_period(self) -> float | None:
         """Median kick interval, folded into the allowed tempo range."""
@@ -241,50 +293,59 @@ class BeatTracker:
             period /= 2
         return period
 
-    def update(self, t: float, kick: bool, tempo_prior: float | None) -> BeatState:
-        """Advance to stream time ``t`` (end of the current hop)."""
-        if kick:
-            self._kick_times.append(t)
+    def update(self, t: float, kick_time: float | None, tempo_prior: float | None) -> BeatState:
+        """Advance to stream time ``t`` (end of the current hop).
+
+        Args:
+            t: Current stream time
+            kick_time: Attack time of a kick detected in this hop, or None
+            tempo_prior: Consensus tempo to follow (BPM), or None
+        """
+        if kick_time is not None:
+            self._kick_times.append(kick_time)
 
         if tempo_prior is not None and self.MIN_BPM <= tempo_prior <= self.MAX_BPM:
-            period = 60.0 / tempo_prior
-            if self._period is None or abs(period - self._period) > 1e-6:
-                self._set_period(period)
-        elif self._period is None:
-            period = self._fallback_period()
-            if period is not None:
-                self._set_period(period)
+            base = 60.0 / tempo_prior
+            if self._base_period is None or abs(base - self._base_period) > 1e-9:
+                self._set_base_period(base)
+        elif self._base_period is None:
+            base = self._fallback_period()
+            if base is not None:
+                self._set_base_period(base)
 
-        if kick and self._period is not None:
+        if kick_time is not None and self._period is not None:
             if self._last_beat is None:
-                self._last_beat = t
-                self._next_beat = t + self._period
-                self._last_match_s = t
+                self._last_beat = kick_time
+                self._next_beat = kick_time + self._period
+                self._last_match_s = kick_time
             else:
                 # Timing error vs. the nearest predicted beat (previous or next).
                 candidates = (self._last_beat, self._next_beat)
-                nearest = min(candidates, key=lambda b: abs(t - b))
-                error = t - nearest
+                nearest = min(candidates, key=lambda b: abs(kick_time - b))
+                error = kick_time - nearest
                 if abs(error) <= self.MATCH_WINDOW * self._period:
                     shift = self.PHASE_GAIN * error
                     self._last_beat += shift
                     self._next_beat += shift
+                    # A kick after its predicted beat means our period is too short
+                    self._period_offset += self.TEMPO_GAIN * error
+                    self._apply_period()
                     self._lock += self.LOCK_GAIN * (1.0 - self._lock)
-                    self._last_match_s = t
+                    self._last_match_s = kick_time
                 else:
                     self._lock -= self.LOCK_GAIN * self._lock
 
-        beat = False
+        beat_time: float | None = None
         if self._next_beat is not None and self._period is not None:
             if t - self._last_match_s > self.LOST_AFTER_S:
                 # Lost lock: drop the phase and wait for the next kick.
                 self._last_beat = self._next_beat = None
                 self._lock = 0.0
             else:
-                while t >= self._next_beat:
+                while self._next_beat <= t + self.lookahead_s:
+                    beat_time = self._next_beat
                     self._last_beat = self._next_beat
                     self._next_beat += self._period
-                    beat = True
                     # Flywheel keeps running through breakdowns, losing confidence.
                     if t - self._last_match_s > 1.5 * self._period:
                         self._lock *= self.MISS_DECAY
@@ -292,7 +353,7 @@ class BeatTracker:
         if self._last_beat is None or self._period is None:
             return BeatState(False, 0.0, 0.0, self.tempo_bpm, None)
         phase = min(max((t - self._last_beat) / self._period, 0.0), 1.0)
-        return BeatState(beat, phase, self._lock, self.tempo_bpm, self._next_beat)
+        return BeatState(beat_time is not None, phase, self._lock, self.tempo_bpm, self._next_beat, beat_time)
 
     @property
     def tempo_bpm(self) -> float | None:
@@ -327,7 +388,7 @@ class RealtimeWorker(Worker):
         self.tempo_prior = tempo_prior
         self.event_callback = event_callback
         self.analyzer = RealtimeAnalyzer(buffer.sample_rate, fft_size, hop_size)
-        self.beat_tracker = BeatTracker()
+        self.beat_tracker = BeatTracker(lookahead_s=hop_size / buffer.sample_rate / 2)
         self.hop_size = hop_size
         self.fft_size = fft_size
         self.hops_processed = 0
@@ -373,7 +434,7 @@ class RealtimeWorker(Worker):
 
     def _process(self, frame: np.ndarray, t: float) -> None:
         hop = self.analyzer.process(frame, t)
-        beat = self.beat_tracker.update(t, hop.kick, self.tempo_prior())
+        beat = self.beat_tracker.update(t, hop.kick_time_s, self.tempo_prior())
         fast = hop.fast
         fast.beat_detected = beat.beat
         fast.beat_phase = beat.phase
@@ -384,11 +445,13 @@ class RealtimeWorker(Worker):
         if hop.onset:
             self._record(TransientEvent(t, "onset", fast.onset_strength), {"timestamp": t, "strength": fast.onset_strength})
         if hop.kick:
-            self._record(TransientEvent(t, "kick", fast.percussive_peak_strength), {"timestamp": t})
+            self._record(TransientEvent(hop.kick_time_s, "kick", fast.percussive_peak_strength),
+                         {"timestamp": hop.kick_time_s})
         if beat.beat:
+            # Timestamped with the exact predicted beat time (within half a hop of t)
             self._record(
-                TransientEvent(t, "beat", beat.confidence),
-                {"timestamp": t, "confidence": beat.confidence, "bpm": beat.tempo_bpm},
+                TransientEvent(beat.beat_time_s, "beat", beat.confidence),
+                {"timestamp": beat.beat_time_s, "confidence": beat.confidence, "bpm": beat.tempo_bpm},
             )
 
         self.hops_processed += 1

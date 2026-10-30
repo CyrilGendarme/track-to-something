@@ -260,7 +260,15 @@ def detect_comb_filter_bank(
         if best_score <= 0:
             return BPMEstimate(method, None, 0.0, error="no periodic candidate found")
 
-        return BPMEstimate(method, float(candidates[best_idx]), max(0.0, min(1.0, best_score)))
+        # Parabolic interpolation between grid candidates (sub-step precision)
+        best_bpm = float(candidates[best_idx])
+        if 0 < best_idx < len(scores) - 1 and scores[best_idx - 1] > -1.0 and scores[best_idx + 1] > -1.0:
+            y0, y1, y2 = scores[best_idx - 1], scores[best_idx], scores[best_idx + 1]
+            denom = y0 - 2 * y1 + y2
+            if denom < 0:
+                best_bpm += float(np.clip(0.5 * (y0 - y2) / denom, -0.5, 0.5)) * step_bpm
+
+        return BPMEstimate(method, best_bpm, max(0.0, min(1.0, best_score)))
     except Exception as exc:  # noqa: BLE001
         return BPMEstimate(method, None, 0.0, error=str(exc))
 
