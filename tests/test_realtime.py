@@ -158,3 +158,57 @@ def test_scheduler_is_latest_wins_and_reports_window() -> None:
     assert results[0].value == SR // 2
     assert results[0].window_end_s == pytest.approx(1.0)
     assert results[0].window_start_s == pytest.approx(0.5)
+
+
+# ── Timing: capture clock, kick localization, beat lookahead ────────────────
+
+def test_ring_buffer_clock_maps_stream_time_and_smooths_jitter() -> None:
+    buf = RingBuffer(capacity_samples=SR, sample_rate=SR)
+    assert buf.unix_time_of(1.0) is None  # no capture timestamps yet
+    rng = np.random.default_rng(0)
+    block = 512
+    for i in range(200):
+        jitter = rng.uniform(-0.003, 0.003)  # callback scheduling noise
+        buf.write(np.zeros(block, dtype=np.float32), capture_time_s=1000.0 + i * block / SR + jitter)
+    assert buf.unix_time_of(2.0) == pytest.approx(1002.0, abs=0.001)
+
+
+def test_ring_buffer_clock_resyncs_after_a_discontinuity() -> None:
+    buf = RingBuffer(capacity_samples=SR, sample_rate=SR)
+    buf.write(np.zeros(512, dtype=np.float32), capture_time_s=1000.0)
+    # The device stalled for 0.5s: the next block's capture time jumps
+    buf.write(np.zeros(512, dtype=np.float32), capture_time_s=1000.0 + 512 / SR + 0.5)
+    assert buf.unix_time_of(512 / SR) == pytest.approx(1000.0 + 512 / SR + 0.5)
+
+
+def test_analyzer_localizes_kick_attack_within_the_hop() -> None:
+    bpm = 120.0
+    y = kick_track(bpm, 6.0, SR)
+    results = _run_analyzer(y)
+    kick_times = [r.kick_time_s for r in results if r.kick]
+    true_times = np.arange(0.0, 6.0, 60.0 / bpm)
+    errors = [k - true_times[np.argmin(np.abs(true_times - k))] for k in kick_times]
+    # Hop-end stamps would be 2-9 ms late; attack localization is ~1 ms
+    assert max(abs(e) for e in errors) < 0.002
+
+
+def test_beat_tracker_emits_ahead_by_lookahead_with_exact_time() -> None:
+    period = 0.5
+    kicks = [0.1 + i * period for i in range(12)]
+    tracker = BeatTracker(lookahead_s=0.08)
+    emitted = []  # (update time, beat time)
+    t, kick_iter = 0.0, iter(kicks)
+    next_kick = next(kick_iter)
+    while t < 6.0:
+        t += 0.005
+        kick_time = None
+        if next_kick is not None and t >= next_kick:
+            kick_time, next_kick = next_kick, next(kick_iter, None)
+        state = tracker.update(t, kick_time, 120.0)
+        if state.beat:
+            emitted.append((t, state.beat_time_s))
+    late = [(t, b) for t, b in emitted if b > 3.0]
+    assert late
+    for t, b in late:
+        assert 0.075 <= b - t <= 0.085                  # emitted ~80 ms ahead
+        assert abs(((b - 0.1 + 0.25) % 0.5) - 0.25) < 0.002  # exact time on the grid

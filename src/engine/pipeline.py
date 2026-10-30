@@ -177,6 +177,7 @@ class AudioPipeline:
         event_callback: Callable[[str, dict], None] | None = None,
         feature_cache: "FeatureCache | None" = None,
         use_processes: bool = JOBS_USE_PROCESSES,
+        beat_lead_s: float | None = None,
     ):
         """Initialize audio pipeline.
 
@@ -195,6 +196,8 @@ class AudioPipeline:
                 repeated pipeline start/stop cycles). A new one is created
                 if omitted.
             use_processes: Run the BPM and key jobs in worker processes.
+            beat_lead_s: Extra beat lead for latency outside the engine's
+                view (default: the ``MOSHPRO_BEAT_LEAD_S`` setting).
         """
         self.sample_rate = sample_rate
         self.feature_cache = feature_cache if feature_cache is not None else FeatureCache()
@@ -223,6 +226,7 @@ class AudioPipeline:
             on_hop=lambda fast, medium: self.feature_cache.update(fast=fast, medium=medium),
             tempo_prior=self._tempo_prior,
             event_callback=event_callback,
+            **({} if beat_lead_s is None else {"beat_lead_s": beat_lead_s}),
         )
         signal_pool = SIGNAL_POOL if use_processes else None
         librosa_pool = LIBROSA_POOL if use_processes else None

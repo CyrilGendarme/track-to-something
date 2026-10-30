@@ -6,6 +6,11 @@ import threading
 
 import numpy as np
 
+# Capture clock smoothing (EMA weight per write) and the jump that is treated
+# as a discontinuity rather than jitter.
+CLOCK_SMOOTHING = 0.05
+CLOCK_RESYNC_S = 0.1
+
 
 class RingBuffer:
     """Single-writer / multi-reader ring buffer for mono float32 audio.
@@ -24,6 +29,9 @@ class RingBuffer:
         self._data = np.zeros(self.capacity, dtype=np.float32)
         self._total_written = 0
         self._closed = False
+        # Smoothed (capture Unix time - stream time) offset; None until the
+        # source provides capture times
+        self._clock_offset: float | None = None
         self._cond = threading.Condition(threading.Lock())
 
     @property
@@ -36,8 +44,13 @@ class RingBuffer:
         with self._cond:
             return self._closed
 
-    def write(self, samples: np.ndarray) -> None:
-        """Append mono samples and wake up readers waiting for new data."""
+    def write(self, samples: np.ndarray, capture_time_s: float | None = None) -> None:
+        """Append mono samples and wake up readers waiting for new data.
+
+        Args:
+            samples: Mono samples
+            capture_time_s: Unix time the first sample was captured, if known
+        """
         samples = np.asarray(samples, dtype=np.float32).reshape(-1)
         n = samples.size
         if n == 0:
@@ -45,6 +58,13 @@ class RingBuffer:
         if n > self.capacity:
             samples = samples[-self.capacity:]
         with self._cond:
+            if capture_time_s is not None:
+                offset = capture_time_s - self._total_written / self.sample_rate
+                if self._clock_offset is None or abs(offset - self._clock_offset) > CLOCK_RESYNC_S:
+                    self._clock_offset = offset  # first write, or a discontinuity (e.g. dropout)
+                else:
+                    # EMA smooths per-block callback jitter; tolerates slow clock drift
+                    self._clock_offset += CLOCK_SMOOTHING * (offset - self._clock_offset)
             start = self._total_written % self.capacity
             m = samples.size
             first = min(m, self.capacity - start)
@@ -59,6 +79,13 @@ class RingBuffer:
         with self._cond:
             self._closed = True
             self._cond.notify_all()
+
+    def unix_time_of(self, stream_time_s: float) -> float | None:
+        """Wall-clock (Unix) time at which stream time ``stream_time_s`` was
+        captured, or None if the source doesn't provide capture times."""
+        with self._cond:
+            offset = self._clock_offset
+        return None if offset is None else offset + stream_time_s
 
     def wait_for(self, position: int, timeout: float) -> int:
         """Block until ``total_written >= position``, the buffer is closed, or timeout.

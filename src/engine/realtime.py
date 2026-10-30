@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import math
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Callable
@@ -21,6 +22,7 @@ from scipy import signal as scipy_signal
 
 from src.analysis.tiers.features import FastFeatures, MediumFeatures
 from src.config import (
+    BEAT_LEAD_S,
     FREQ_BAND_BASS_MAX,
     FREQ_BAND_BASS_MIN,
     FREQ_BAND_HIGH_MAX,
@@ -48,6 +50,10 @@ LEVEL_ATTACK_S = 0.01
 LEVEL_RELEASE_S = 0.15
 # Absolute floor for band normalization (avoid amplifying silence to 1.0).
 LEVEL_FLOOR = 1e-3
+# Beats are emitted early by the measured age of the analyzed audio (device
+# buffering + block + analysis) so they arrive on time in the real world;
+# capped to stay sane if the clock mapping is off.
+MAX_LATENCY_COMPENSATION_S = 0.3
 # Kick attack localization: search the bass envelope of the last few hops
 # for where it first rises this fraction of the way to its peak.
 ATTACK_SEARCH_HOPS = 3
@@ -380,19 +386,27 @@ class RealtimeWorker(Worker):
         event_callback: Callable[[str, dict], None] | None = None,
         fft_size: int = REALTIME_FFT_SIZE,
         hop_size: int = REALTIME_HOP_SIZE,
+        beat_lead_s: float = BEAT_LEAD_S,
         daemon: bool = True,
     ):
         super().__init__(name="Realtime", daemon=daemon)
+        self.beat_lead_s = beat_lead_s
         self.buffer = buffer
         self.on_hop = on_hop
         self.tempo_prior = tempo_prior
         self.event_callback = event_callback
         self.analyzer = RealtimeAnalyzer(buffer.sample_rate, fft_size, hop_size)
-        self.beat_tracker = BeatTracker(lookahead_s=hop_size / buffer.sample_rate / 2)
+        self._half_hop_s = hop_size / buffer.sample_rate / 2
+        self.beat_tracker = BeatTracker(lookahead_s=self._half_hop_s)
         self.hop_size = hop_size
         self.fft_size = fft_size
         self.hops_processed = 0
         self.hops_skipped = 0
+        # How far analysis trails the newest captured audio (seconds)
+        self.backlog_s = 0.0
+        self.max_backlog_s = 0.0
+        # Wall-clock age of the audio when analyzed (needs capture timestamps)
+        self.audio_age_s = 0.0
         self._events: deque[TransientEvent] = deque(maxlen=512)
         self._events_lock = threading.Lock()
 
@@ -430,10 +444,20 @@ class RealtimeWorker(Worker):
                     position += skipped * self.hop_size
                     logger.warning("[%s] Fell behind, skipped %d hops", self.name, skipped)
                     continue
+                self.backlog_s = (available - position) / sr
+                self.max_backlog_s = max(self.max_backlog_s, self.backlog_s)
                 self._process(frame, position / sr)
 
     def _process(self, frame: np.ndarray, t: float) -> None:
         hop = self.analyzer.process(frame, t)
+
+        # Stream time lags real time by the age of the audio; predicting
+        # that far ahead makes beat events land on the real beat.
+        captured = self.buffer.unix_time_of(t)
+        age = 0.0 if captured is None else min(max(time.time() - captured, 0.0), MAX_LATENCY_COMPENSATION_S)
+        self.audio_age_s = age
+        self.beat_tracker.lookahead_s = self._half_hop_s + age + self.beat_lead_s
+
         beat = self.beat_tracker.update(t, hop.kick_time_s, self.tempo_prior())
         fast = hop.fast
         fast.beat_detected = beat.beat
@@ -441,6 +465,9 @@ class RealtimeWorker(Worker):
         fast.beat_confidence = beat.confidence
         fast.tempo_bpm = beat.tempo_bpm
         fast.predicted_next_beat_s = beat.next_beat_s
+        fast.audio_age_s = age
+        if beat.next_beat_s is not None:
+            fast.predicted_next_beat_unix_s = self.buffer.unix_time_of(beat.next_beat_s)
 
         if hop.onset:
             self._record(TransientEvent(t, "onset", fast.onset_strength), {"timestamp": t, "strength": fast.onset_strength})
@@ -448,10 +475,16 @@ class RealtimeWorker(Worker):
             self._record(TransientEvent(hop.kick_time_s, "kick", fast.percussive_peak_strength),
                          {"timestamp": hop.kick_time_s})
         if beat.beat:
-            # Timestamped with the exact predicted beat time (within half a hop of t)
+            # Timestamped with the exact predicted beat time; emitted up to the
+            # audio age + half a hop ahead of it
             self._record(
                 TransientEvent(beat.beat_time_s, "beat", beat.confidence),
-                {"timestamp": beat.beat_time_s, "confidence": beat.confidence, "bpm": beat.tempo_bpm},
+                {
+                    "timestamp": beat.beat_time_s,
+                    "time_unix": self.buffer.unix_time_of(beat.beat_time_s),
+                    "confidence": beat.confidence,
+                    "bpm": beat.tempo_bpm,
+                },
             )
 
         self.hops_processed += 1

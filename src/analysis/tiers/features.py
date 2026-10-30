@@ -35,6 +35,12 @@ class FastFeatures:
     beat_confidence: float = 0.0  # 0-1 lock quality of the beat tracker
     tempo_bpm: float | None = None  # Tempo the tracker is currently using
     predicted_next_beat_s: float | None = None  # Stream time of the next beat
+    # Wall-clock (Unix) time of the next beat, for scheduling in other
+    # processes; None when the source has no capture timestamps (files)
+    predicted_next_beat_unix_s: float | None = None
+    # How old the analyzed audio was when this hop was processed (device
+    # buffering + analysis), in seconds; 0 when unknown
+    audio_age_s: float = 0.0
 
 @dataclass
 class MediumFeatures:

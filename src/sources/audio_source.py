@@ -14,6 +14,9 @@ class AudioChunk:
 
     samples: np.ndarray
     sample_rate: int
+    # Wall-clock (Unix) time the first sample was captured, when the source
+    # knows it (live devices); None for files and synthetic sources.
+    capture_time_s: float | None = None
 
 
 class AudioSource(Protocol):

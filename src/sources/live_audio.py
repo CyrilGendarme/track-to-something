@@ -2,14 +2,49 @@
 
 from __future__ import annotations
 
+import sys
+import time
+from contextlib import contextmanager
 from queue import Empty, Queue
-from typing import Iterator
+from typing import TYPE_CHECKING, Iterator
 
 import numpy as np
-import sounddevice as sd
 
 from src.config import AUDIO_BLOCK_SIZE, DEFAULT_SAMPLE_RATE
 from .audio_source import AudioChunk
+
+if TYPE_CHECKING:
+    import sounddevice as sd
+
+# sounddevice is imported lazily: importing it initializes PortAudio (driver
+# enumeration), and the job worker processes - which re-import the main
+# module on Windows - have no use for that.
+
+_COINIT_MULTITHREADED = 0
+
+
+@contextmanager
+def _com_initialized():
+    """Initialize COM on the current thread (Windows only).
+
+    PortAudio's WASAPI backend needs COM on the thread that opens the stream.
+    PortAudio initializes it on the thread that imported sounddevice (in the
+    GUI, the Tk thread), so opening a WASAPI stream from the capture thread
+    otherwise fails with "Unanticipated host error". MME and DirectSound
+    don't need it.
+    """
+    if sys.platform != "win32":
+        yield
+        return
+    import ctypes
+
+    ole32 = ctypes.windll.ole32
+    hr = ole32.CoInitializeEx(None, _COINIT_MULTITHREADED)
+    try:
+        yield
+    finally:
+        if hr in (0, 1):  # S_OK / S_FALSE: balance our initialization
+            ole32.CoUninitialize()
 
 
 class SoundDeviceSource:
@@ -22,31 +57,51 @@ class SoundDeviceSource:
         self.channels = channels
         self.block_size = block_size
         self.loopback = loopback
-        self._chunks: Queue[np.ndarray | None] = Queue()
+        self._chunks: Queue[tuple[np.ndarray, float] | None] = Queue()
         self._stream: sd.InputStream | None = None
         self._closed = False
+        # Blocks the device reported as dropped/corrupted (PortAudio status flags)
+        self.overflows = 0
+        # Input latency declared by the opened stream (seconds)
+        self._input_latency = 0.0
 
-    def _callback(self, indata, _frames, _time, _status) -> None:
+    def _callback(self, indata, frames, time_info, status) -> None:
         # Runs on the PortAudio thread: copy and hand off, nothing else.
-        self._chunks.put(indata.copy())
+        if status:
+            self.overflows += 1
+        # Unix time of the block's first sample. The driver's ADC timestamp is
+        # used only when plausible: PortAudio's WASAPI backend reports it
+        # several ms in the *future*. Otherwise: arrival time minus the block
+        # duration and the stream's declared input latency. (Scheduling jitter
+        # is smoothed by the ring buffer's clock.)
+        now = time.time()
+        block_age = time_info.currentTime - time_info.inputBufferAdcTime
+        if not (time_info.inputBufferAdcTime > 0 and frames / self.sample_rate <= block_age < 1.0):
+            block_age = frames / self.sample_rate + self._input_latency
+        self._chunks.put((indata.copy(), now - block_age))
 
     def __iter__(self) -> Iterator[AudioChunk]:
+        import sounddevice as sd
+
         device = self._find_loopback_device(sd) if self.loopback else self.device
-        self._stream = sd.InputStream(device=device, samplerate=self.sample_rate,
-                                      channels=self.channels, blocksize=self.block_size,
-                                      dtype="float32", callback=self._callback)
         # The stream is opened and closed by the iterating thread only; close()
         # just wakes it up with a sentinel.
-        with self._stream:
-            while not self._closed:
-                try:
-                    samples = self._chunks.get(timeout=1.0)
-                except Empty:
-                    continue
-                if samples is None:
-                    break
-                yield AudioChunk(samples=samples, sample_rate=self.sample_rate)
-        self._stream = None
+        with _com_initialized():
+            self._stream = sd.InputStream(device=device, samplerate=self.sample_rate,
+                                          channels=self.channels, blocksize=self.block_size,
+                                          dtype="float32", callback=self._callback)
+            self._input_latency = float(self._stream.latency)
+            with self._stream:
+                while not self._closed:
+                    try:
+                        item = self._chunks.get(timeout=1.0)
+                    except Empty:
+                        continue
+                    if item is None:
+                        break
+                    samples, captured = item
+                    yield AudioChunk(samples=samples, sample_rate=self.sample_rate, capture_time_s=captured)
+            self._stream = None
 
     def _find_loopback_device(self, sounddevice_module) -> int:
         """Find a Windows loopback/stereo mix device index."""

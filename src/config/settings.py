@@ -53,6 +53,12 @@ REALTIME_FFT_SIZE: Final[int] = int(os.getenv("MOSHPRO_REALTIME_FFT_SIZE", "1024
 ONSET_MIN_INTERVAL_S: Final[float] = float(os.getenv("MOSHPRO_ONSET_MIN_INTERVAL_S", "0.08"))
 KICK_MIN_INTERVAL_S: Final[float] = float(os.getenv("MOSHPRO_KICK_MIN_INTERVAL_S", "0.2"))
 
+# Extra lead for beat events (seconds), on top of the automatically measured
+# capture latency. Use it for latency the engine can't see: upstream (e.g. a
+# virtual cable's buffer, mixer -> interface) and downstream (OBS / video
+# pipeline / projector). Beats are then emitted that much earlier.
+BEAT_LEAD_S: Final[float] = float(os.getenv("MOSHPRO_BEAT_LEAD_S", "0.0"))
+
 # Adaptive onset threshold: mean + K * std of recent spectral flux.
 ONSET_THRESHOLD_K: Final[float] = float(os.getenv("MOSHPRO_ONSET_THRESHOLD_K", "2.0"))
 

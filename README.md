@@ -67,10 +67,13 @@ Any iterable of `src.sources.AudioChunk` works as a source; see
 - **Real-time path** (`src/engine/realtime.py`): sequential and stateful
   (spectral flux, adaptive thresholds, beat phase), so it runs in exactly one
   thread. It costs well under a millisecond per hop.
-- **Beat tracking**: a phase-locked loop running at the consensus BPM and
-  nudged by detected kicks. Beats are emitted when the predicted beat time
-  arrives, so they don't carry detection latency, and the tracker keeps
-  going through short breakdowns.
+- **Beat tracking**: a phase-locked loop running at the consensus BPM. Each
+  kick's attack is located inside the hop (to about 1 ms) and corrects both
+  the beat phase and a small tempo offset, so a slightly-off BPM estimate
+  doesn't leave a lag. Beats come from the prediction, not the detection:
+  each one is emitted ahead of time by the measured age of the audio
+  (device buffering + analysis), plus `MOSHPRO_BEAT_LEAD_S`, and carries its
+  exact predicted time. The tracker keeps going through short breakdowns.
 - **Background jobs** (`src/engine/scheduler.py`): each job declares its
   cadence, window and executor. If a job is still running, the next tick is
   skipped, never queued. Heavy jobs run in app-wide worker processes, which
@@ -83,12 +86,15 @@ Any iterable of `src.sources.AudioChunk` works as a source; see
 
 | Group | Updated | Fields (highlights) |
 |---|---|---|
-| `fast` | every hop | `onset_detected`, `onset_strength`, `is_percussive_peak` (kick), `raw_energy`, `beat_detected`, `beat_phase`, `beat_confidence`, `tempo_bpm`, `predicted_next_beat_s` |
+| `fast` | every hop | `onset_detected`, `onset_strength`, `is_percussive_peak` (kick), `raw_energy`, `beat_detected`, `beat_phase`, `beat_confidence`, `tempo_bpm`, `predicted_next_beat_s`, `predicted_next_beat_unix_s`, `audio_age_s` |
 | `medium` | every hop | `bass_energy`, `mid_energy`, `high_energy` (0-1, relative to the band's recent peak), deltas |
 | `slow` | on each job result | levels, `spectral_density_*`, `energy_trend`, `detected_key`, `key_confidence`, `estimated_bpm`, `beat_stability`, band envelopes |
 | `bpm_estimates` | every ~1 s | per-method BPM + confidence, plus the octave-aware consensus |
 
-Timestamps are stream time in seconds (sample count / sample rate).
+Timestamps are stream time in seconds (sample count / sample rate). For live
+devices, `predicted_next_beat_unix_s` (and `time_unix` on beat events) give
+the beat as a Unix time, so other local processes, e.g. an OBS browser source
+using `Date.now() / 1000`, can schedule on it.
 
 ## Local API
 
@@ -106,12 +112,29 @@ All settings live in `src/config/settings.py` and can be overridden with
 windows (`MOSHPRO_BPM_INTERVAL_S`, `MOSHPRO_KEY_WINDOW_S`, …), and
 `MOSHPRO_JOBS_USE_PROCESSES=false` to run every job in threads.
 
+`MOSHPRO_BEAT_LEAD_S` emits beats earlier to cover latency the engine can't
+measure: upstream (a virtual cable's buffer, mixer → interface) and downstream
+(OBS, video pipeline, projector). The loopback test below suggests a value for
+the upstream part.
+
 ## Tests and diagnostics
 
 ```bash
 python -m pytest -q                      # synthetic audio, no files or devices needed
 python -m src.diagnostics.worker_debug   # real-time health check on a local file
+
+# Real hardware: play a known 128 BPM / C major signal into an output and
+# analyze it live from an input (virtual cable or line out -> line in).
+# Nothing is recorded; prints driver overflows, backlog, accuracy and
+# wall-clock event timing, and suggests a MOSHPRO_BEAT_LEAD_S value.
+python -m src.diagnostics.loopback_test --out "CABLE Input" --in "CABLE Output"
 ```
+
+Measured through VB-Audio Virtual Cable (WASAPI, 48 kHz, 512-sample blocks):
+0 overflows and 0 skipped hops; BPM and key correct, with the first estimates
+2.5 s and 3.4 s after playback starts; kick timing ±1–2 ms; beats within
+±3 ms of the kicks; audio about 24 ms old when analyzed. With the suggested
+lead, beat events arrive within a few ms of the kick reaching the output.
 
 ## Project layout
 

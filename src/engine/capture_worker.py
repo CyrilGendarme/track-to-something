@@ -75,7 +75,10 @@ class AudioCaptureWorker(Worker):
                         f"Source sample rate {chunk.sample_rate} Hz does not match the "
                         f"pipeline sample rate {self.buffer.sample_rate} Hz"
                     )
-                self.buffer.write(self._condition(np.asarray(chunk.samples, dtype=np.float32)))
+                self.buffer.write(
+                    self._condition(np.asarray(chunk.samples, dtype=np.float32)),
+                    capture_time_s=getattr(chunk, "capture_time_s", None),
+                )
                 self.chunk_count += 1
         finally:
             self.buffer.close()

@@ -23,6 +23,7 @@ from .settings import (
     KICK_MIN_INTERVAL_S,
     ONSET_THRESHOLD_K,
     SILENCE_RMS,
+    BEAT_LEAD_S,
     # Background jobs
     DYNAMICS_INTERVAL_S,
     DYNAMICS_WINDOW_S,
@@ -62,6 +63,7 @@ __all__ = [
     "KICK_MIN_INTERVAL_S",
     "ONSET_THRESHOLD_K",
     "SILENCE_RMS",
+    "BEAT_LEAD_S",
     "DYNAMICS_INTERVAL_S",
     "DYNAMICS_WINDOW_S",
     "BPM_INTERVAL_S",
