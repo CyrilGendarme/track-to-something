@@ -42,6 +42,13 @@ class FastFeatures:
     # buffering + analysis), in seconds; 0 when unknown
     audio_age_s: float = 0.0
 
+    # Running totals since the pipeline started. The *_detected flags above
+    # are true for a single ~6ms hop, so a consumer that samples (GUI poll,
+    # WebSocket push) can miss them - compare these counters instead.
+    onset_count: int = 0
+    kick_count: int = 0
+    beat_count: int = 0
+
 @dataclass
 class MediumFeatures:
     """Smoothed band levels (updated every hop).

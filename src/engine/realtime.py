@@ -407,6 +407,9 @@ class RealtimeWorker(Worker):
         self.max_backlog_s = 0.0
         # Wall-clock age of the audio when analyzed (needs capture timestamps)
         self.audio_age_s = 0.0
+        self._onset_count = 0
+        self._kick_count = 0
+        self._beat_count = 0
         self._events: deque[TransientEvent] = deque(maxlen=512)
         self._events_lock = threading.Lock()
 
@@ -468,6 +471,12 @@ class RealtimeWorker(Worker):
         fast.audio_age_s = age
         if beat.next_beat_s is not None:
             fast.predicted_next_beat_unix_s = self.buffer.unix_time_of(beat.next_beat_s)
+        self._onset_count += hop.onset
+        self._kick_count += hop.kick
+        self._beat_count += beat.beat
+        fast.onset_count = self._onset_count
+        fast.kick_count = self._kick_count
+        fast.beat_count = self._beat_count
 
         if hop.onset:
             self._record(TransientEvent(t, "onset", fast.onset_strength), {"timestamp": t, "strength": fast.onset_strength})

@@ -76,6 +76,8 @@ class RealTimeMetricsDisplay(ttk.Frame):
             "fast_beat_phase": MetricField("Beat Phase", "beat_phase", "fast", "{:.2f}", "", True, 1.0),
             "fast_beat_lock": MetricField("Beat Lock", "beat_confidence", "fast", "{:.2f}", "", True, 1.0),
             "fast_tempo": MetricField("Tracked Tempo", "tempo_bpm", "fast", "{:.1f}", " BPM"),
+            "fast_beat_count": MetricField("Beats", "beat_count", "fast", "{:d}", ""),
+            "fast_audio_age": MetricField("Audio Age (s)", "audio_age_s", "fast", "{:.3f}", ""),
             
             # MEDIUM TIER (every hop, smoothed)
             "medium_bass": MetricField("Bass Energy", "bass_energy", "medium", "{:.3f}", "", True, 1.0),

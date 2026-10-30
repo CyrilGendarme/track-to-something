@@ -41,6 +41,9 @@ def test_pipeline_analyzes_every_hop_in_order() -> None:
 
     fast, medium, slow = pipeline.feature_cache.get_all()
     assert fast is not None and medium is not None and slow is not None
+    # Counters let samplers detect events they didn't see
+    assert fast.onset_count == len(onset_times)
+    assert fast.beat_count == sum(1 for kind, _ in events if kind == "beat")
     assert 0.0 <= medium.bass_energy <= 1.0
     assert slow.spectral_density_low > slow.spectral_density_high
 
