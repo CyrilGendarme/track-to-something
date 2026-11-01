@@ -148,6 +148,9 @@ src/
 tests/         pytest suite (synthetic audio helpers in tests/synthetic.py)
 ```
 
-> The long-form guides in `documentation/` and `docs/` describe an earlier
-> version of the engine (e.g. `LiveAudio`, `pipeline.get_frame()`) and are
-> out of date; this README reflects the current code.
+## Documentation
+
+Detailed guides are in [documentation/](documentation/00_README.md):
+architecture, events vs. signals, API reference, analysis methods, beat
+tracking and latency, integration (OBS / browser / Python), the GUI, and
+configuration and diagnostics.

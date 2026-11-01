@@ -1,533 +1,119 @@
-# Architecture Guide
-
-Complete overview of the real-time audio analysis engine architecture.
-
-## System Overview
-
-A multi-threaded pipeline that captures, analyzes, and renders audio features in real-time with predictive beat synchronization.
+# Architecture
 
 ```
-Audio Source (Loopback/USB/File)
-            ↓
-┌─────────────────────────────────────────────┐
-│ AudioCaptureWorker (daemon thread)          │
-│ • Reads audio chunks from source            │
-│ • Stores in 5-second circular buffer        │
-│ • Sends to processing queue (~21 fps)       │
-└─────────────────────────────────────────────┘
-            ↓ processing_queue
-┌─────────────────────────────────────────────┐
-│ AudioProcessingWorker × 4 (parallel)        │
-│ • STFT computation                          │
-│ • Spectral feature extraction               │
-│ • Beat confidence estimation                │
-│ • Tempo/BPM calculation                     │
-└─────────────────────────────────────────────┘
-            ↓ features_queue
-┌─────────────────────────────────────────────┐
-│ AnalysisWorker                              │
-│ • Event detection (beat, kick, snare)       │
-│ • Beat prediction from tempo                │
-│ • Onset detection                           │
-│ • Event callbacks                           │
-└─────────────────────────────────────────────┘
-            ↓ rendering_queue
-┌─────────────────────────────────────────────┐
-│ RenderingWorker                             │
-│ • Output to game/visualizer                 │
-│ • UI updates                                │
-│ • Data logging                              │
-└─────────────────────────────────────────────┘
-            ↓
-     (Game/UI/Output)
+ audio device ──► AudioCaptureWorker ──► RingBuffer (mono, absolute sample index, capture clock)
+                  (mono mix, 20 Hz HPF)      │
+                    ┌────────────────────────┴───────────────────────┐
+                    ▼                                                ▼
+        RealtimeWorker — every hop (~6 ms)               JobScheduler — latest-wins
+        onsets, kicks, band levels,                      dynamics      thread            every 0.25 s, 2 s window
+        beat tracker ◄──── consensus tempo ───────────── BPM (numpy)   "signal" pool     every 1 s,    8 s window
+                    │                                    BPM (librosa) "librosa" pool    every 1 s,    8 s window
+                    │                                    key           "signal" pool     every 2 s,    8 s window
+                    ▼                                                │
+                    └───────────────► FeatureCache ◄─────────────────┘
+                                          │
+                          GUI (polls, 20 Hz)   Local API (push, ≤ 60 Hz)
 ```
 
-## Core Components
-
-### 1. CircularAudioBuffer
-
-**Purpose:** Thread-safe ring buffer for shared audio storage
-
-**Size:** 5 seconds (220,500 samples @ 44.1kHz, 2 channels)
-
-**Operations:**
-- `write(samples)`: Add chunk with wrap-around
-- `read_latest(duration_s)`: Get most recent samples
-
-**Thread Safety:** `threading.RLock` protects all access
-
-```python
-buffer = CircularAudioBuffer(capacity_s=5.0, sample_rate=44100)
-buffer.write(audio_chunk)  # 2048 samples
-recent = buffer.read_latest(1.0)  # Last 1 second
-```
-
-### 2. Worker Threads
-
-#### AudioCaptureWorker
-- **Role**: Source of audio data
-- **Frequency**: Reads 2048-sample chunks ~21 times/second
-- **Output**: `AudioChunkMessage` to processing queue
-- **Storage**: Circular buffer for multi-window analysis
-
-```python
-worker = AudioCaptureWorker(
-    audio_source=source,
-    output_queue=queue,
-    buffer=circular_buffer,
-)
-worker.start()
-```
-
-#### AudioProcessingWorker (×4 parallel)
-- **Role**: Feature extraction via STFT
-- **Input**: `AudioChunkMessage` from processing queue
-- **Output**: `AudioFeaturesMessage` to features queue
-- **Parallelism**: 4 workers handle queue load
-
-**Features extracted:**
-- Amplitude: RMS, peak, overall
-- Spectral: Bass/mid/high energy (3 frequency bands)
-- Onset: Rapid energy rise detection
-- Tempo: BPM estimation from energy peaks
-- Envelopes: Per-band energy over time
-
-```python
-worker = AudioProcessingWorker(
-    input_queue=processing_queue,
-    output_queue=features_queue,
-)
-worker.start()
-```
-
-#### AnalysisWorker
-- **Role**: Event detection and prediction
-- **Input**: `AudioFeaturesMessage` from features queue
-- **Output**: `RenderingMessage` to rendering queue
-- **State**: Maintains beat history for tempo estimation
-
-**Detection:**
-- Beat transitions (onset confidence → peak)
-- Kick detection (bass energy > threshold)
-- Snare detection (mid/high energy peaks)
-- General onsets (rapid energy rise)
-
-**Prediction:**
-- Estimates next beat from recent beat intervals
-- Calculates beat phase (0=beat, 1=next beat)
-- Computes prediction confidence
-
-```python
-worker = AnalysisWorker(
-    input_queue=features_queue,
-    output_queue=rendering_queue,
-)
-worker.start()
-```
-
-#### RenderingWorker
-- **Role**: Final output stage
-- **Input**: `RenderingMessage` or `AudioFrame` from rendering queue
-- **Output**: Game/UI updates, logging, OSC streaming
-
-```python
-worker = RenderingWorker(
-    input_queue=rendering_queue,
-)
-worker.start()
-```
-
-### 3. Message Types
-
-#### AudioChunkMessage
-Raw audio samples from capture.
-
-```python
-@dataclass
-class AudioChunkMessage:
-    samples: np.ndarray  # (n_samples, 2) float32
-    sample_rate: int
-```
-
-#### AudioFeaturesMessage
-Comprehensive features from processing worker (15 fields).
-
-```python
-@dataclass
-class AudioFeaturesMessage:
-    timestamp_s: float
-    
-    # Amplitude
-    overall_amplitude: float
-    rms: float
-    peak: float
-    
-    # Spectral
-    bass_energy: float
-    mid_energy: float
-    high_energy: float
-    spectral_centroid_hz: float | None
-    dominant_frequency_hz: float | None
-    
-    # Temporal
-    onset_detected: bool
-    beat_detected: bool
-    beat_confidence: float
-    
-    # Tempo
-    bpm: float | None
-    
-    # Envelopes
-    band_bass_envelope: tuple[float, ...] | None
-    band_mid_envelope: tuple[float, ...] | None
-    band_high_envelope: tuple[float, ...] | None
-```
-
-#### RenderingMessage
-Normalized output with predictive beat sync (12 fields).
-
-```python
-@dataclass
-class RenderingMessage:
-    timestamp_s: float
-    
-    # Energy (0-1)
-    bass: float
-    energy: float
-    brightness: float
-    impact: float
-    
-    # Events
-    beat: bool
-    beat_confidence: float
-    onset: bool
-    
-    # Derived
-    tempo_bpm: float | None
-    dynamics: float
-    
-    # Predictive
-    beat_phase_0to1: float
-    predicted_beat_timestamp_s: float | None
-    prediction_confidence: float
-```
-
-#### AudioFrame
-Combined events and signals.
-
-```python
-@dataclass
-class AudioFrame:
-    timestamp_s: float
-    signals: ContinuousSignals
-    events: list[AudioEvent]
-```
-
-### 4. Multi-Window Analyzer
-
-**Purpose:** Three concurrent analysis windows on same circular buffer
-
-**Architecture:**
-- Single 50-100ms circular buffer
-- FastAnalyzer (10ms windows) - immediate transient detection
-- MediumAnalyzer (32ms windows) - energy tracking with STFT
-- SlowAnalyzer (250ms windows) - overall metrics and beat tracking
-
-**Efficiency:**
-- CPU: 5-10% (vs 15-30% for separate pipelines)
-- Memory: 100KB (vs 22MB for traditional approach)
-
-```python
-analyzer = MultiWindowAudioAnalyzer(
-    sample_rate=44100,
-    fast_window_ms=10.0,     # 5-10ms latency
-    medium_window_ms=32.0,   # 20-50ms latency
-    slow_window_ms=250.0,    # 100-500ms latency
-)
-
-# Analyze current buffer
-fast, medium, slow = analyzer.analyze_all(timestamp_s)
-```
-
-### 5. BeatPredictor
-
-**Purpose:** Estimate next beat from tempo history
-
-**Algorithm:**
-- Records last N beat timestamps (default: 10)
-- Calculates interval statistics (mean, std dev)
-- Predicts next beat assuming constant BPM
-- Confidence based on interval stability
-
-**Latency Advantage:**
-- Reactive beat detection: 100-150ms latency
-- Predictive beat detection: -50ms (ahead of audio)
-- Enables zero-latency rhythm synchronization
-
-```python
-predictor = BeatPredictor()
-predictor.record_beat(timestamp_s=10.5)
-
-# 50ms later
-beat_phase, confidence = predictor.get_beat_phase(10.55)
-next_beat_time = predictor.predict_next_beat(10.55)
-```
-
-## Data Flow
-
-### Capture → Processing
-1. AudioCaptureWorker reads 2048 samples
-2. Stores in circular buffer
-3. Sends `AudioChunkMessage` to processing queue
-4. Frequency: ~21 times/second (2048 @ 44.1kHz)
-
-### Processing → Analysis
-1. AudioProcessingWorker gets `AudioChunkMessage`
-2. Computes STFT (n_fft=2048, hop=512, Hann window)
-3. Extracts frequency bands (bass, mid, high)
-4. Detects onsets, estimates BPM
-5. Sends `AudioFeaturesMessage` to features queue
-6. With 4 parallel workers: throughput matches or exceeds input
-
-### Analysis → Rendering
-1. AnalysisWorker gets `AudioFeaturesMessage`
-2. Detects beat transitions and events
-3. Updates BeatPredictor with beat timestamps
-4. Computes beat phase and next beat prediction
-5. Sends `RenderingMessage` to rendering queue
-6. Also generates `AudioFrame` with clean events/signals separation
-
-### Rendering → Output
-1. RenderingWorker gets `RenderingMessage`/`AudioFrame`
-2. Sends to game, UI, OSC, logging, etc.
-3. Optional frame skipping for lower CPU
-
-## Threading Model
-
-### Thread Safety
-
-**Circular Buffer:**
-- Protected by `threading.RLock`
-- Multiple readers (all analyzers) OK
-- Single writer (capture worker)
-
-**Queues:**
-- Use `queue.Queue` (thread-safe by design)
-- Non-blocking get with timeout (0.1s)
-- Non-blocking put when queue full
-
-**Worker States:**
-- Each thread has `_stop_event` for graceful shutdown
-- `is_stopped()` checked in main loop
-- `join()` waits for completion
-
-**Event Callbacks:**
-- Called from AnalysisWorker thread
-- Consumer responsible for thread safety
-- Can queue work to game thread instead
-
-### Synchronization
-
-```
-Timeline (milliseconds):
-0     - Audio sample captured by OS
-~5-10 - AudioCaptureWorker reads it
-~15   - In circular buffer
-~25   - AudioProcessingWorker computes STFT
-~35   - AudioFeaturesMessage in queue
-~40   - AnalysisWorker processes features
-~45   - RenderingMessage ready
-~50   - Game/UI receives output
-
-Total latency: 45-50ms (capture to output)
-```
-
-## Performance Characteristics
-
-| Metric | Value | Notes |
-|--------|-------|-------|
-| CPU Usage | 5-10% | vs 15-30% for separate pipelines |
-| Memory | ~100KB | Circular buffer only |
-| Capture Latency | ~5-10ms | OS audio → engine |
-| Processing Latency | ~20-30ms | STFT computation |
-| Analysis Latency | ~5ms | Event detection |
-| Total Pipeline | ~45-50ms | Capture to output |
-| Fast Tier | 5-10ms | From buffer read |
-| Medium Tier | 20-50ms | With STFT |
-| Slow Tier | 100-500ms | Windowed averaging |
-| Predictive Latency | -50ms | Ahead of actual beat |
-
-## Queue Depths
-
-Under normal operation:
-
-| Queue | Typical Depth | Max Depth |
-|-------|---------------|-----------|
-| Processing | 1-3 chunks | 10 (backpressure) |
-| Features | 1-2 messages | 10 |
-| Rendering | 0-1 messages | 10 |
-
-When queue full:
-- Capture worker waits (backpressure)
-- Processing workers drain queue
-- System self-regulates
-
-## Integration Points
-
-### Input: Audio Sources
-- `LiveAudio`: Loopback (Stereo Mix) or USB device
-- `LocalFileAudio`: WAV file playback
-- Custom: Implement `AudioSource` interface
-
-### Output: Consumers
-- Game engine: Get frames, handle events/signals
-- Visualizer: Animate with continuous signals
-- OSC: Stream to Max/MSP, Pure Data, etc.
-- Network: Send to other machines
-- Database: Log analytics
-- Callbacks: Event listeners
-
-## Configuration
-
-### Typical Setup
-```python
-from src.engine import AudioPipeline
-from src.sources import LiveAudio
-
-pipeline = AudioPipeline(
-    audio_source=LiveAudio(),
-    num_processing_workers=4,
-    circular_buffer_capacity_s=5.0,
-    output_queue_maxsize=10,
-)
-pipeline.start()
-```
-
-### Tuning for Your Use Case
-
-**Low Latency (games):**
-- Use FastAnalyzer and events
-- Small rendering queue (1-2 items)
-- Skip non-critical frames
-
-**Smooth Animation:**
-- Use MediumAnalyzer and signals
-- Enable interpolation in consumer
-
-**Beat Synchronization:**
-- Use BeatPredictor
-- Predictive latency: -50ms (ahead)
-
-**Analysis/Logging:**
-- Use SlowAnalyzer for metrics
-- Large circular buffer (5-10s)
-- Log all events
-
-## Design Decisions
-
-### Why Multi-Threaded?
-
-**Benefits:**
-- Capture never blocks processing
-- Processing never blocks analysis
-- UI thread stays responsive
-- Scales to multiple cores
-
-**Trade-offs:**
-- Complexity of queue management
-- Potential for queue backlog
-- Thread synchronization overhead
-
-### Why Circular Buffer?
-
-**Benefits:**
-- Constant memory (no growth)
-- Efficient for multi-window analysis
-- Single shared buffer for all analyzers
-
-**Trade-offs:**
-- Fixed size (can't grow larger)
-- Wrap-around complexity
-
-### Why Multi-Window?
-
-**Benefits:**
-- Different latencies for different needs
-- Single efficient buffer
-- Optimal CPU usage
-
-**Trade-offs:**
-- More complex than single-window
-- Requires explicit tier selection
-
-### Why Predictive Beat?
-
-**Benefits:**
-- Zero-latency rhythm sync (-50ms)
-- Enables rhythm games
-- Better UX for user actions
-
-**Trade-offs:**
-- Requires stable tempo
-- Needs beat detection first
-
-## Extending the System
-
-### Add Custom Audio Source
-```python
-from src.sources import AudioSource
-
-class MyAudioSource(AudioSource):
-    def read_chunk(self) -> np.ndarray:
-        # Return (n_samples, 2) float32 audio
-        pass
-```
-
-### Add Custom Analysis
-```python
-# Hook into AnalysisWorker's processing
-def custom_analysis(features: AudioFeaturesMessage) -> dict:
-    return {
-        "custom_metric": calculate_something(features)
-    }
-```
-
-### Add Custom Event Type
-```python
-from src.engine.events import EventType
-
-# Extend EventType enum
-# Add to event detection in AnalysisWorker
-```
-
-### Add Custom Rendering
-```python
-class CustomRenderer(RenderingWorker):
-    def _process_item(self, item: RenderingMessage):
-        # Custom output here
-        pass
-```
-
-## Troubleshooting Architecture Issues
-
-### Queue Bottleneck
-- Increase `num_processing_workers`
-- Profile with `queue.qsize()`
-- Check if consumer is slow
-
-### High Latency
-- Reduce circular buffer size
-- Skip some processing
-- Profile timing at each stage
-
-### Lost Events
-- Increase queue sizes
-- Add event buffering
-- Verify event generation
-
-### Out of Sync Beat
-- Check BeatPredictor confidence
-- Verify beat detection is working
-- Try different confidence thresholds
-
-See [06_TIERED_ANALYSIS.md](06_TIERED_ANALYSIS.md) for analysis specifics and [08_INTEGRATION_GUIDE.md](08_INTEGRATION_GUIDE.md) for consumer patterns.
+## Design rules
+
+1. **One writer, one buffer.** Only the capture thread writes. Every reader
+   asks for an exact span by absolute sample index, so it can use any window
+   length, detect that it fell behind (the span was overwritten), and say
+   which audio its result covers.
+2. **Stateful work is sequential.** Spectral flux needs the previous frame,
+   adaptive thresholds need history, and the beat tracker needs its phase.
+   All of that runs in one thread, in stream order. Splitting chunks across
+   threads would break it (an earlier version did, and scrambled the analysis).
+3. **Parallelism is by task, not by chunk.** Each expensive analysis is a job
+   with its own cadence and window, running beside the real-time path.
+4. **Nothing queues up.** If a job is still running when its next tick comes,
+   the tick is skipped: a slow job runs less often, it never builds a
+   backlog. The real-time thread never blocks on consumers.
+5. **Consumers read one store.** The GUI and the API only read the
+   `FeatureCache`. Tk widgets are only touched from the Tk thread.
+
+## Components
+
+### Capture — `src/engine/capture_worker.py`
+Pulls `AudioChunk`s from the source and does cheap, stateful conditioning:
+mono mix, a 20 Hz high-pass whose filter state carries across chunks, and
+optional quantization. It also passes the chunk's capture timestamp to the
+ring buffer. On `stop()` it closes the source, so a blocking device read
+returns.
+
+### Live sources — `src/sources/live_audio.py`
+`SoundDeviceSource` (and `AudioInputSource` / `ApplicationAudioSource`) wrap a
+PortAudio input stream:
+
+- The PortAudio callback only copies the block and its capture time into a
+  queue.
+- The stream is opened and closed by the reading (capture) thread, with COM
+  initialized on it. WASAPI needs this, and fails with "Unanticipated host
+  error" without it.
+- `sounddevice` is imported lazily, so the job worker processes don't
+  initialize PortAudio.
+- `overflows` counts blocks the driver reported as dropped.
+
+### Ring buffer — `src/engine/buffer.py`
+A fixed-size mono float32 array: `MOSHPRO_BUFFER_CAPACITY_SECONDS` (12 s by
+default), and never less than the longest job window plus 2 s of headroom. Readers wait on a condition variable for new
+data. It also keeps a **capture clock**: a smoothed mapping from stream time
+(samples ÷ sample rate) to Unix time, which latency compensation relies on
+(see [06](06_BEAT_TRACKING_AND_LATENCY.md)).
+
+### Real-time path — `src/engine/realtime.py`
+`RealtimeWorker` walks the buffer one hop (256 samples) at a time, analyzing
+a 1024-sample frame that ends at each hop:
+
+- `RealtimeAnalyzer`: onsets (spectral flux), kicks (bass-band flux) with
+  the attack located inside the hop, and band levels.
+- `BeatTracker`: a phase-locked loop around the consensus tempo.
+- Publishes `FastFeatures` + `MediumFeatures` to the cache on every hop, and
+  `onset` / `beat` events to the callback.
+
+The cost is well under a millisecond per hop. If the thread ever falls behind
+by more than the buffer, it skips ahead and counts `hops_skipped`.
+
+### Scheduler — `src/engine/scheduler.py`
+An `AnalysisJob` declares `fn(window, sample_rate)`, an interval, a window
+length and where it runs:
+
+- `process_pool=None` runs it in the scheduler's thread pool.
+- Otherwise it runs in a named, app-wide `ProcessPoolExecutor`:
+  - **Process pools outlive pipelines.** Spawning a worker and importing
+    librosa takes seconds, so it happens once. The GUI starts warming the
+    pools at launch (`prewarm_job_processes()`).
+  - **librosa gets its own pool** (`"librosa"`, 1 worker), so its slow first
+    import never delays key detection or the numpy BPM detectors (`"signal"`,
+    2 workers).
+  - A broken pool (a crashed worker) is discarded and recreated.
+- When a finite source ends, `AudioPipeline.wait()` lets in-flight jobs
+  publish their final results before stopping the scheduler.
+
+### Pipeline and cache — `src/engine/pipeline.py`
+`AudioPipeline` wires everything together. It merges the results of the two
+BPM jobs into one octave-aware consensus, feeds that tempo back to the beat
+tracker as a prior, smooths key estimates, and assembles `SlowFeatures`
+whenever any job reports. `FeatureCache` holds the latest of each group and
+calls an optional update callback, which the API uses to push.
+
+### Local API — `src/api/server.py`
+aiohttp on its own event-loop thread, bound to 127.0.0.1. HTTP endpoints
+return the cache. WebSocket clients get a snapshot on connect, then pushes
+merged to at most 60 per second. See [04](04_API_REFERENCE.md).
+
+## Threads and processes at run time
+
+| Name | Kind | Does |
+|---|---|---|
+| PortAudio callback | driver thread | copies blocks into the source queue |
+| `Capture` | thread | source → conditioning → ring buffer |
+| `Realtime` | thread | per-hop analysis, beat tracking, events |
+| `JobScheduler` | thread | ticks jobs, copies their windows |
+| `job_*` | thread pool (2) | dynamics |
+| `signal` pool | 2 processes | numpy BPM detectors, key |
+| `librosa` pool | 1 process | librosa beat tracker |
+| `AnalysisAPIServer` | thread + asyncio loop | HTTP/WebSocket |
+| Tk main thread | GUI | polls the cache at 20 Hz, drains the UI queue |

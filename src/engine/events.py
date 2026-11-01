@@ -170,11 +170,13 @@ class AudioFrame:
     """Combined audio analysis frame.
     
     Contains both discrete events and continuous signals at same timestamp.
-    This is what you typically receive from the audio engine.
-    
+    A standalone container for applications that want this shape; the
+    pipeline itself publishes FastFeatures/MediumFeatures/SlowFeatures via
+    its FeatureCache (see documentation/03_EVENTS_AND_SIGNALS.md).
+
     Usage:
-        frame = audio_analyzer.get_frame()
-        
+        frame = AudioFrame(timestamp_s=t, signals=signals, events=events)
+
         # Handle events
         for event in frame.events:
             if event.event_type == EventType.KICK:

@@ -1,327 +1,93 @@
-# Quick Start Guide
+# Quick start
 
-Get the audio analysis engine running in 10 minutes.
+## Install
 
-## Prerequisites
+Python 3.13 on Windows is the tested setup.
 
-- Python 3.13+
-- pip
-- Windows 10/11 with audio input (loopback audio or USB device)
-
-## Installation
-
-### 1. Clone and Install
 ```bash
-cd moshpro-spout-obs-glue-script
 pip install -r requirements.txt
 ```
 
-### 2. Setup Audio Source
+## Run the GUI
 
-#### Option A: Loopback Audio (Stereo Mix)
-**Windows:**
-1. Right-click Speaker → Sound settings
-2. Advanced → App volume and device preferences
-3. Find stereo mix in recording devices
-4. Enable if disabled
-5. Set as default recording device
+```bash
+python -m src.gui.main_gui
+```
 
-#### Option B: USB Audio Device
-Just plug in your USB audio interface - it's automatically detected.
+1. Pick a device under **Audio Input**: a mixer or USB interface, Stereo Mix,
+   a virtual cable, or a running application.
+2. Press **▶ Start Analysis**. Band levels and onsets appear immediately; the
+   first BPM and key estimates arrive after about 2.5 s and 3.5 s.
+3. Tick **Enable Local API** to let other apps read the data at
+   `http://127.0.0.1:8768`.
 
-#### Option C: File Playback
-Use any WAV file on disk.
+See [08 GUI guide](08_GUI_GUIDE.md) for details.
 
-## Your First Program (10 lines)
+## Use the engine from Python
 
 ```python
+import time
 from src.engine import AudioPipeline
-from src.sources import LocalFileAudio
+from src.sources import AudioInputSource
 
-# Create pipeline
-pipeline = AudioPipeline(audio_source=LocalFileAudio("song.wav"))
-pipeline.start()
+source = AudioInputSource(device=3, sample_rate=48000)  # python list_devices.py
+pipeline = AudioPipeline(
+    audio_source=lambda: source,
+    sample_rate=48000,                                   # must match the source
+    event_callback=lambda kind, data: print(kind, data), # "onset" / "beat"
+).start()
 
-# Process frames
-for _ in range(100):
-    frame = pipeline.get_frame()
-    if frame:
-        print(f"Bass: {frame.signals.bass_energy:.2f}")
-
-pipeline.stop()
+last_beats = 0
+try:
+    while True:
+        fast, medium, slow = pipeline.feature_cache.get_all()
+        if fast is not None:
+            if fast.beat_count != last_beats:            # a beat happened since last poll
+                last_beats = fast.beat_count
+                print("beat!")
+            print(f"bass {medium.bass_energy:.2f}  phase {fast.beat_phase:.2f}  "
+                  f"bpm {slow.estimated_bpm if slow else None}")
+        time.sleep(1 / 60)
+finally:
+    pipeline.stop()
+    pipeline.wait()
 ```
 
-## Common Patterns
+Things to know:
 
-### Pattern 1: Respond to Events
+- `audio_source` is a callable returning an iterable of `AudioChunk`. It's
+  called on the capture thread when the pipeline starts.
+- The pipeline's `sample_rate` must equal the source's. A mismatch raises
+  `ValueError` from `wait()` rather than silently mis-timing everything.
+- `event_callback` runs on the real-time thread, so keep it cheap. GUI code
+  must hand the work over to its own thread (the bundled GUI uses a queue
+  drained by `after()`).
+- Single-hop flags like `beat_detected` are easy to miss when polling; compare
+  the `*_count` counters instead (see [03](03_EVENTS_AND_SIGNALS.md)).
 
-```python
-from src.engine import AudioPipeline, EventType
-from src.sources import LocalFileAudio
+## Analyze a file
 
-pipeline = AudioPipeline(audio_source=LocalFileAudio("song.wav"))
-pipeline.start()
-
-while pipeline.is_running():
-    frame = pipeline.get_frame()
-    if not frame:
-        continue
-    
-    # Handle events
-    for event in frame.events:
-        if event.event_type == EventType.KICK:
-            print(f"KICK! (strength={event.strength:.2f})")
-        elif event.event_type == EventType.SNARE:
-            print(f"SNARE! (strength={event.strength:.2f})")
-        elif event.event_type == EventType.BEAT:
-            print(f"BEAT (confidence={event.confidence:.2f})")
-
-pipeline.stop()
-```
-
-### Pattern 2: Animate with Signals
+Any iterable of `AudioChunk` works; see `examples/example.py`:
 
 ```python
+import soundfile as sf
 from src.engine import AudioPipeline
-from src.sources import LocalFileAudio
+from src.sources import AudioChunk
 
-pipeline = AudioPipeline(audio_source=LocalFileAudio("song.wav"))
-pipeline.start()
+def file_source(path, block=4096):
+    with sf.SoundFile(path) as f:
+        while len(samples := f.read(block, dtype="float32", always_2d=True)):
+            yield AudioChunk(samples=samples, sample_rate=f.samplerate)
 
-# Object state
-scale = 1.0
-brightness = 0.5
-
-while pipeline.is_running():
-    frame = pipeline.get_frame()
-    if not frame:
-        continue
-    
-    # Smooth interpolation
-    target_scale = 1.0 + frame.signals.bass_energy * 0.5
-    scale = scale * 0.85 + target_scale * 0.15  # Lerp with factor 0.15
-    
-    target_brightness = frame.signals.brightness
-    brightness = brightness * 0.9 + target_brightness * 0.1
-    
-    print(f"Scale: {scale:.2f}, Brightness: {brightness:.2f}")
-
-pipeline.stop()
+pipeline = AudioPipeline(audio_source=lambda: file_source("song.wav"),
+                         sample_rate=sf.info("song.wav").samplerate).start()
+pipeline.wait()   # returns when the file is analyzed and the last job results are in
+print(pipeline.feature_cache.get_all()[2])  # SlowFeatures: BPM, key, dynamics
 ```
 
-### Pattern 3: Hybrid (Events + Signals)
-
-```python
-from src.engine import AudioPipeline, EventType
-from src.sources import LocalFileAudio
-
-pipeline = AudioPipeline(audio_source=LocalFileAudio("song.wav"))
-pipeline.start()
-
-while pipeline.is_running():
-    frame = pipeline.get_frame()
-    if not frame:
-        continue
-    
-    # Immediate response to events
-    for event in frame.events:
-        if event.event_type == EventType.KICK:
-            print("FLASH!")
-    
-    # Smooth animation with signals
-    bass_scale = 1.0 + frame.signals.bass_energy * 0.3
-    brightness = frame.signals.brightness
-    
-    print(f"Bass scale: {bass_scale:.2f}, Brightness: {brightness:.2f}")
-
-pipeline.stop()
-```
-
-### Pattern 4: Predictive Beat Sync
-
-```python
-from src.engine import AudioPipeline
-from src.sources import LocalFileAudio
-
-pipeline = AudioPipeline(audio_source=LocalFileAudio("song.wav"))
-pipeline.start()
-
-while pipeline.is_running():
-    frame = pipeline.get_frame()
-    if not frame:
-        continue
-    
-    # How far away is the next beat?
-    time_until_beat = frame.signals.predicted_beat_timestamp_s - frame.timestamp_s
-    
-    if 0 < time_until_beat < 0.05:  # 50ms before beat
-        print(f"BEAT ARRIVING IN {time_until_beat*1000:.1f}ms!")
-    
-    # Use this to trigger effects 50ms early
-    # Eliminates 100-150ms reactive latency
-    print(f"Beat phase: {frame.signals.beat_phase_0to1:.2f}")
-
-pipeline.stop()
-```
-
-## Understanding the Output
-
-### AudioFrame Structure
-
-Every frame contains:
-- `timestamp_s`: Current time in seconds
-- `signals`: Smooth continuous values
-- `events`: Discrete occurrences this frame
-
-### ContinuousSignals (25 fields)
-
-Organized by latency tier:
-
-**Tier 1 (5-10ms latency):**
-```python
-frame.signals.immediate_energy           # 0-1 current amplitude
-frame.signals.immediate_energy_derivative # change/sec
-```
-
-**Tier 2 (20-50ms latency):**
-```python
-frame.signals.bass_energy                # 0-1 (20-250 Hz)
-frame.signals.mid_energy                 # 0-1 (250-4k Hz)
-frame.signals.high_energy                # 0-1 (4k-20k Hz)
-frame.signals.brightness                 # 0-1 (spectral centroid)
-frame.signals.spectral_density_bass      # 0-1 (proportion)
-frame.signals.spectral_density_mid       # 0-1
-frame.signals.spectral_density_high      # 0-1
-```
-
-**Tier 3 (100-500ms latency):**
-```python
-frame.signals.average_energy             # 0-1 typical loudness
-frame.signals.energy_variance            # 0-1 how dynamic
-frame.signals.energy_trend               # -1 to 1 (building vs fading)
-frame.signals.estimated_bpm              # Hz (or None)
-frame.signals.beat_stability             # 0-1 tempo consistency
-```
-
-**Beat Prediction (all tiers):**
-```python
-frame.signals.beat_phase_0to1            # 0=beat, 1=next beat
-frame.signals.predicted_beat_timestamp_s # When next beat arrives
-frame.signals.prediction_confidence      # 0-1
-```
-
-### AudioEvent Types (14 types)
-
-```python
-EventType.BEAT              # Detected beat
-EventType.KICK              # Bass transient
-EventType.SNARE             # Mid/high transient
-EventType.CYMBAL            # High transient
-EventType.PERCUSSION        # Generic percussion
-EventType.ONSET             # Any rapid energy rise
-EventType.TRANSIENT         # Rapid attack
-EventType.ENERGY_SPIKE      # Sudden energy increase
-EventType.ENERGY_DROP       # Sudden energy decrease
-EventType.SILENCE_STARTED   # Energy below threshold
-EventType.SILENCE_ENDED     # Energy above threshold
-EventType.BASS_SURGE        # Bass energy spike
-EventType.TREBLE_SURGE      # Treble energy spike
-```
-
-## Using Different Audio Sources
-
-### Loopback Audio
-```python
-from src.sources import LiveAudio
-from src.engine import AudioPipeline
-
-# Auto-detect Stereo Mix
-pipeline = AudioPipeline(audio_source=LiveAudio())
-```
-
-### USB Audio Device
-```python
-from src.sources import LiveAudio
-from src.engine import AudioPipeline
-
-# Auto-detect USB device
-pipeline = AudioPipeline(audio_source=LiveAudio(device_name="USB"))
-```
-
-### File Playback
-```python
-from src.sources import LocalFileAudio
-from src.engine import AudioPipeline
-
-pipeline = AudioPipeline(audio_source=LocalFileAudio("song.wav"))
-```
-
-## Adjusting for Your Use Case
-
-### For Responsive Effects (Low Latency)
-Use **Tier 1 events** + **Tier 2 signals**:
-```python
-for event in frame.events:
-    # These have 5-10ms latency
-    if event.event_type == EventType.KICK:
-        trigger_effect()
-
-# These have 20-50ms latency
-scale = 1.0 + frame.signals.bass_energy * 0.3
-```
-
-### For Smooth Animation (Interpolated)
-Use **Tier 2 and 3 signals**:
-```python
-# Tier 2: 20-50ms, responsive
-bass_scale = 1.0 + frame.signals.bass_energy * 0.3
-
-# Tier 3: 100-500ms, smooth
-overall_brightness = frame.signals.average_energy
-```
-
-### For Predictive Rhythm Sync (Zero Latency)
-Use **beat prediction**:
-```python
-time_until = frame.signals.predicted_beat_timestamp_s - frame.timestamp_s
-if 0 < time_until < 0.05:
-    prepare_effect()  # Will sync exactly at beat
-```
-
-## Troubleshooting
-
-### No events detected
-- Make sure Stereo Mix is enabled (for loopback audio)
-- Check that audio is actually playing
-- Volume might be too low - ensure audio source is loud enough
-
-### Audio processing is slow
-- Reduce frame rate in integration code
-- Run with fewer processing workers
-- Profile with `time.time()` to find bottleneck
-
-### Pipeline doesn't start
-- Check that audio source is available
-- Verify audio device is properly configured
-- Try with a file source first
-
-### Inaccurate beat detection
-- Different music styles require tuning
-- Try adjusting confidence thresholds in analysis
-- Use beat prediction instead of reactive detection
-
-## Next Steps
-
-- Read [02_ARCHITECTURE.md](02_ARCHITECTURE.md) to understand the design
-- Explore [QUICK_REFERENCE.md](QUICK_REFERENCE.md) for more patterns
-- Check [EXAMPLES.md](EXAMPLES.md) for real-world use cases
-- See [08_INTEGRATION_GUIDE.md](08_INTEGRATION_GUIDE.md) for game/app integration
-
-## Performance Tips
-
-1. **Don't process every frame** - Add frame skipping if CPU is high
-2. **Use appropriate tiers** - Fast tier for immediate, Slow tier for smooth
-3. **Batch events** - Collect events over multiple frames if possible
-4. **Cache calculations** - Don't recalculate values each frame
-
-See [02_ARCHITECTURE.md](02_ARCHITECTURE.md) for performance benchmarks.
+A file is read much faster than real time. The real-time path still analyzes
+every hop in order, but the background jobs run on wall-clock intervals and
+only sample the file while it's being read. When the source ends, `wait()`
+runs every job once more on the final window. You always get BPM, key and
+dynamics, but for the **end** of the file (the last 8 s for BPM and key).
+For whole-file values, pace the source or analyze sections separately.
