@@ -346,9 +346,9 @@ class AudioPipeline:
         self.capture_worker.join(timeout=timeout)
         self.realtime_worker.join(timeout=timeout)
         if not self.realtime_worker.is_alive():
-            # Source finished: let in-flight jobs publish their final
-            # results, then stop scheduling (there is no new audio).
-            self.scheduler.finish(timeout=timeout)
+            # Source finished: let in-flight jobs publish, then (unless the
+            # user stopped us) run every job once on the final window.
+            self.scheduler.finish(timeout=timeout, final_pass=self._running)
             self._running = False
         else:
             self.scheduler.join(timeout=timeout)

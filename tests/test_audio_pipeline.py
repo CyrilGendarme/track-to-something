@@ -109,3 +109,11 @@ def test_pipeline_rejects_mismatched_sample_rate() -> None:
     with pytest.raises(ValueError, match="sample rate"):
         pipeline.wait(timeout=5.0)
     pipeline.stop()
+
+
+def test_finite_source_gets_a_final_pass_of_every_job() -> None:
+    """A file is read in milliseconds - wait() must still deliver BPM and key."""
+    pipeline, _ = _run(duration_s=10.0, speed=None, use_processes=False)
+    _, _, slow = pipeline.feature_cache.get_all()
+    assert slow.estimated_bpm == pytest.approx(BPM, abs=2.0)
+    assert slow.detected_key == "C"

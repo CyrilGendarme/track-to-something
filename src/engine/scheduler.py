@@ -218,22 +218,34 @@ class JobScheduler(Worker):
         super().stop()
         self._shutdown_pools()
 
-    def finish(self, timeout: float | None = None) -> None:
+    def finish(self, timeout: float | None = None, final_pass: bool = True) -> None:
         """Stop scheduling, but let running jobs complete and publish first.
 
-        Used when a finite source (e.g. a file) has been fully analyzed, so
-        its last BPM/key results aren't thrown away.
+        Used when a finite source (e.g. a file) has been fully analyzed. With
+        ``final_pass``, every job then runs once more on the final window: a
+        file is read much faster than the jobs' wall-clock intervals, so
+        otherwise some jobs might never have seen a full window.
         """
         super().stop()
         if self.is_alive():
             self.join(timeout=timeout)
         deadline = None if timeout is None else time.monotonic() + timeout
+        self._wait_published(deadline)  # in-flight runs publish before the final pass
+        if final_pass:
+            sr = self.buffer.sample_rate
+            for job in self.jobs:
+                window, end = self.buffer.read_latest(int(job.window_s * sr))
+                if window.size >= job.min_window_s * sr and np.any(window):
+                    self._submit(job, window, end)
+            self._wait_published(deadline)
+        self._shutdown_pools()
+
+    def _wait_published(self, deadline: float | None) -> None:
         for job in self.jobs:
             if job._future is None:
                 continue
             remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
             job._published.wait(remaining)
-        self._shutdown_pools()
 
     def _shutdown_pools(self) -> None:
         # The shared process pool outlives this scheduler; only drop our runs
