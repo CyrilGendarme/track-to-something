@@ -262,8 +262,9 @@ class AudioPipeline:
         """Health figures for monitoring (cheap; any thread).
 
         ``load`` is the real-time path's analysis time per hop as a fraction
-        of the hop duration; ``overflows`` counts blocks the audio driver
-        reported as dropped (live devices only).
+        of the hop duration; ``input_dbfs`` the input level over about the
+        last second; ``overflows`` counts blocks the audio driver reported as
+        dropped (live devices only).
         """
         rt = self.realtime_worker
         source = self.capture_worker._source
@@ -277,6 +278,7 @@ class AudioPipeline:
             "backlog_s": rt.backlog_s,
             "max_backlog_s": rt.max_backlog_s,
             "audio_age_s": rt.audio_age_s,
+            "input_dbfs": rt.input_dbfs,
             "overflows": getattr(source, "overflows", None),
             "jobs": {
                 job.name: {"runs": job.runs, "skipped": job.skipped, "last_compute_s": job.last_compute_s}

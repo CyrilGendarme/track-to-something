@@ -36,6 +36,7 @@ error is logged and the controls reset.
 
 | Row | Meaning | Healthy |
 |---|---|---|
+| Input level | input RMS over the last second | about −30 to −10 dBFS for music; flagged red below −45 |
 | Uptime | time since Start, hops analyzed (and skipped, if any) | no skipped hops |
 | Real-time load | analysis time per hop as a share of the hop's duration | a few %; above 80 % it's flagged as too slow |
 | Backlog (max) | how far analysis trails the newest audio (worst so far) | under ~50 ms |

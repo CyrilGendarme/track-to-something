@@ -241,3 +241,15 @@ def test_analyzer_custom_band_follows_its_range_and_can_change_live() -> None:
 
     analyzer.set_custom_band(None)
     assert run(320 * 256, 1)[-1].custom_band_hz is None
+
+
+def test_kick_strength_holds_long_enough_to_be_sampled() -> None:
+    results = _run_analyzer(kick_track(120.0, 4.0, SR))
+    hop_s = 256 / SR
+    kick_hops = [i for i, r in enumerate(results) if r.kick]
+    assert kick_hops
+    for i in kick_hops:
+        assert results[i].fast.percussive_peak_strength > 0.3
+        # Still clearly visible 50 ms later (a 20 Hz GUI poll), decaying
+        later = results[i + round(0.05 / hop_s)].fast.percussive_peak_strength
+        assert 0.1 < later < results[i].fast.percussive_peak_strength

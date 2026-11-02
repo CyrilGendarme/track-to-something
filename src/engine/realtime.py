@@ -60,6 +60,11 @@ ATTACK_SEARCH_HOPS = 3
 ATTACK_FRACTION = 0.25
 # EMA rate of the real-time load figure (per hop).
 LOAD_SMOOTHING = 0.01
+# Kick strength jumps on each kick, then decays (seconds to fall by ~63%), so
+# consumers sampling at display rates still see it.
+KICK_STRENGTH_DECAY_S = 0.1
+# Time constant of the input level meter (seconds).
+INPUT_LEVEL_S = 1.0
 
 
 @dataclass(frozen=True)
@@ -182,6 +187,8 @@ class RealtimeAnalyzer:
         self._release = 1.0 - math.exp(-self.hop_s / LEVEL_RELEASE_S)
         self._bands = {name: self._band_level(bins) for name, bins in self.band_bins.items()}
         self._prev_overall = 0.0
+        self._kick_decay = math.exp(-self.hop_s / KICK_STRENGTH_DECAY_S)
+        self._kick_strength = 0.0
         # User-selected band: (level tracker, (low_hz, high_hz)), swapped as a
         # whole so another thread can change it between hops
         self._custom: tuple[_BandLevel, tuple[float, float]] | None = None
@@ -270,6 +277,9 @@ class RealtimeAnalyzer:
         self._bass_flux.push(bass_flux)
 
         onset_strength = min(1.0, flux / (2.0 * onset_thr)) if onset_thr else 0.0
+        self._kick_strength *= self._kick_decay
+        if kick:
+            self._kick_strength = max(self._kick_strength, min(1.0, bass_flux / (2.0 * kick_thr)))
 
         prev_bass = self._bands["bass"].level
         levels = {name: band.update(mag) for name, band in self._bands.items()}
@@ -282,7 +292,7 @@ class RealtimeAnalyzer:
             onset_detected=onset,
             onset_strength=onset_strength,
             is_percussive_peak=kick,
-            percussive_peak_strength=levels["bass"] if kick else 0.0,
+            percussive_peak_strength=self._kick_strength,
             raw_energy=raw_energy,
         )
         medium = MediumFeatures(
@@ -488,11 +498,19 @@ class RealtimeWorker(Worker):
         # Smoothed analysis time per hop, as a fraction of the hop's duration
         # (1.0 = the real-time path can only just keep up)
         self.load = 0.0
+        # Input level over the last ~second, dBFS (mean square, smoothed)
+        self._input_ms = 0.0
+        self._input_coeff = 1.0 - math.exp(-(hop_size / buffer.sample_rate) / INPUT_LEVEL_S)
         self._onset_count = 0
         self._kick_count = 0
         self._beat_count = 0
         self._events: deque[TransientEvent] = deque(maxlen=512)
         self._events_lock = threading.Lock()
+
+    @property
+    def input_dbfs(self) -> float:
+        """Input RMS over about the last second, in dBFS (-120 for silence)."""
+        return 10.0 * math.log10(max(self._input_ms, 1e-12))
 
     def recent_events(self, since_s: float) -> list[TransientEvent]:
         """Transient events with ``timestamp_s >= since_s`` (thread-safe)."""
@@ -580,5 +598,6 @@ class RealtimeWorker(Worker):
                 },
             )
 
+        self._input_ms += self._input_coeff * (fast.raw_energy ** 2 - self._input_ms)
         self.hops_processed += 1
         self.on_hop(fast, hop.medium)

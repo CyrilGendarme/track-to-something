@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 
 # The Performance panel refreshes every this many display updates (~0.5 s)
 PERF_REFRESH_TICKS = 10
+# Input level warning threshold. Music normally sits around -30..-10 dBFS;
+# near the silence gate (SILENCE_RMS, -60 dBFS) kicks are ignored, so there is
+# no beat phase or lock and the level meters stay at their floor.
+QUIET_DBFS = -45.0
 
 
 class FrequencyRangeSelector(ttk.Frame):
@@ -233,6 +237,7 @@ class AnalysisControlPanel(ttk.Frame):
     """Control panel for analysis settings and pipeline control."""
 
     PERF_ROWS = {
+        "input": "Input level",
         "uptime": "Uptime",
         "load": "Real-time load",
         "backlog": "Backlog (max)",
@@ -336,7 +341,10 @@ class AnalysisControlPanel(ttk.Frame):
         hops = f"{stats['hops_processed']} hops"
         if stats["hops_skipped"]:
             hops += f", {stats['hops_skipped']} skipped"
+        input_dbfs = stats["input_dbfs"]
+        input_note = "  (very quiet: is the music reaching this input?)" if input_dbfs < QUIET_DBFS else ""
         rows = {
+            "input": f"{input_dbfs:.0f} dBFS{input_note}",
             "uptime": f"{stats['uptime_s']:.0f} s  ({hops})",
             "load": f"{load * 100:.1f}% of real time" + ("  (too slow!)" if load > 0.8 else ""),
             "backlog": f"{stats['backlog_s'] * 1000:.0f} ms  ({stats['max_backlog_s'] * 1000:.0f} ms)",
@@ -346,6 +354,7 @@ class AnalysisControlPanel(ttk.Frame):
         }
         for key, text in rows.items():
             self.perf_labels[key].config(text=f"{self.PERF_ROWS[key]}: {text}")
+        self.perf_labels["input"].config(foreground="#e05555" if input_note else FG)
 
 
 class LocalApiPanel(ttk.Frame):

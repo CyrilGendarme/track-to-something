@@ -136,5 +136,7 @@ def test_pipeline_reports_custom_band_and_stats() -> None:
     assert stats["hops_processed"] == pipeline.realtime_worker.hops_processed > 0
     assert 0.0 < stats["load"] < 1.0
     assert stats["overflows"] is None  # not a live device
+    # kick_track RMS is about 0.14 -> about -17 dBFS
+    assert -25.0 < stats["input_dbfs"] < -10.0
     assert set(stats["jobs"]) == {"dynamics", "bpm", "bpm_librosa", "key"}
     assert stats["jobs"]["key"]["runs"] >= 1

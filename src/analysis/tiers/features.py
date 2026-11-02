@@ -25,7 +25,7 @@ class FastFeatures:
     
     # Percussive peak detection
     is_percussive_peak: bool      # True during kick/snare
-    percussive_peak_strength: float  # 0-1 (amplitude of peak)
+    percussive_peak_strength: float  # 0-1, jumps on each kick then decays (~100 ms)
     
     # RMS of the newest hop
     raw_energy: float             # 0-1 (immediate amplitude)
