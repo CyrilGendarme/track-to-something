@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import Callable, Optional
 
 import numpy as np
@@ -178,6 +179,7 @@ class AudioPipeline:
         feature_cache: "FeatureCache | None" = None,
         use_processes: bool = JOBS_USE_PROCESSES,
         beat_lead_s: float | None = None,
+        custom_band_hz: tuple[float, float] | None = None,
     ):
         """Initialize audio pipeline.
 
@@ -198,6 +200,8 @@ class AudioPipeline:
             use_processes: Run the BPM and key jobs in worker processes.
             beat_lead_s: Extra beat lead for latency outside the engine's
                 view (default: the ``MOSHPRO_BEAT_LEAD_S`` setting).
+            custom_band_hz: Optional (low, high) band reported as
+                ``MediumFeatures.custom_energy``; see :meth:`set_custom_band`.
         """
         self.sample_rate = sample_rate
         self.feature_cache = feature_cache if feature_cache is not None else FeatureCache()
@@ -228,6 +232,8 @@ class AudioPipeline:
             event_callback=event_callback,
             **({} if beat_lead_s is None else {"beat_lead_s": beat_lead_s}),
         )
+        if custom_band_hz is not None:
+            self.set_custom_band(*custom_band_hz)
         signal_pool = SIGNAL_POOL if use_processes else None
         librosa_pool = LIBROSA_POOL if use_processes else None
         self.jobs = [
@@ -242,6 +248,41 @@ class AudioPipeline:
         ]
         self.scheduler = JobScheduler(self.audio_buffer, self.jobs)
         self._running = False
+        self._started_at: float | None = None
+
+    def set_custom_band(self, low_hz: float | None, high_hz: float | None = None) -> None:
+        """Track an extra band, e.g. one instrument's range (any thread, any time).
+
+        Reported every hop as ``MediumFeatures.custom_energy`` (0-1, like the
+        fixed bands). ``None`` turns it off.
+        """
+        self.realtime_worker.analyzer.set_custom_band(low_hz, high_hz)
+
+    def stats(self) -> dict:
+        """Health figures for monitoring (cheap; any thread).
+
+        ``load`` is the real-time path's analysis time per hop as a fraction
+        of the hop duration; ``overflows`` counts blocks the audio driver
+        reported as dropped (live devices only).
+        """
+        rt = self.realtime_worker
+        source = self.capture_worker._source
+        return {
+            "running": self.is_running(),
+            "uptime_s": 0.0 if self._started_at is None else time.monotonic() - self._started_at,
+            "audio_s": self.audio_buffer.total_written / self.sample_rate,
+            "hops_processed": rt.hops_processed,
+            "hops_skipped": rt.hops_skipped,
+            "load": rt.load,
+            "backlog_s": rt.backlog_s,
+            "max_backlog_s": rt.max_backlog_s,
+            "audio_age_s": rt.audio_age_s,
+            "overflows": getattr(source, "overflows", None),
+            "jobs": {
+                job.name: {"runs": job.runs, "skipped": job.skipped, "last_compute_s": job.last_compute_s}
+                for job in self.jobs
+            },
+        }
 
     # ── job results ───────────────────────────────────────────────────────
 
@@ -320,6 +361,7 @@ class AudioPipeline:
         logger.info("Starting audio pipeline (ring buffer %.1fs @ %d Hz)",
                     self.audio_buffer.capacity / self.sample_rate, self.sample_rate)
         self._running = True
+        self._started_at = time.monotonic()
         self.capture_worker.start()
         self.realtime_worker.start()
         self.scheduler.start()

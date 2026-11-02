@@ -72,7 +72,16 @@ output and input default sample rates must match.
 It feeds a local file (from `tests/settings.py`) at real-time pace and prints
 thread liveness, hop counters and job statistics once per second.
 
+**Live health** — `pipeline.stats()` (also shown in the GUI's Performance
+panel) gives the real-time load, backlog, audio age, driver overflows and
+per-job compute times at any moment.
+
 **Devices** — `python list_devices.py`.
+
+**Tests** — `python -m pytest -q` runs `tests/` only (see `pytest.ini`); the
+`test_*.py` scripts at the repo root are manual tools that open the GUI,
+list devices or connect to a running API. If a test stalls for 120 s,
+pytest dumps every thread's stack.
 
 ## Troubleshooting
 
@@ -81,7 +90,7 @@ thread liveness, hop counters and job statistics once per second.
 | "Unanticipated host error" when starting | WASAPI stream opened without COM on the thread; fixed in `SoundDeviceSource`. If it persists, the device is held exclusively by another app |
 | `ValueError: Source sample rate … does not match` | pass the device's sample rate to `AudioPipeline` |
 | BPM/key slow to appear | worker processes still warming (librosa takes seconds to load on first use); call `prewarm_job_processes()` early |
-| `hops_skipped` > 0 or a large `max_backlog_s` | the real-time thread is starved of CPU; close heavy apps or raise `MOSHPRO_REALTIME_HOP_SIZE` |
+| `hops_skipped` > 0, a large `max_backlog_s` or a high `load` | the real-time thread is starved of CPU; close heavy apps or raise `MOSHPRO_REALTIME_HOP_SIZE` |
 | `overflows` > 0 | the driver dropped input; raise `MOSHPRO_BLOCK_SIZE` |
 | Beats consistently early or late | tune `MOSHPRO_BEAT_LEAD_S` ([06](06_BEAT_TRACKING_AND_LATENCY.md)) |
 | Key flips between relative major/minor | expected on ambiguous material; check `key_confidence` |

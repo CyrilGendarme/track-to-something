@@ -58,6 +58,8 @@ MAX_LATENCY_COMPENSATION_S = 0.3
 # for where it first rises this fraction of the way to its peak.
 ATTACK_SEARCH_HOPS = 3
 ATTACK_FRACTION = 0.25
+# EMA rate of the real-time load figure (per hop).
+LOAD_SMOOTHING = 0.01
 
 
 @dataclass(frozen=True)
@@ -72,20 +74,75 @@ class HopResult:
 
 
 class _AdaptiveThreshold:
-    """mean + k * std over a sliding window of recent values."""
+    """mean + k * std over a sliding window of recent values.
+
+    Keeps running sums, so each hop costs O(1) instead of a pass over the
+    whole history.
+    """
+
+    RESUM_EVERY = 4096  # recompute the sums from scratch now and then (float drift)
 
     def __init__(self, size: int, k: float):
-        self.values: deque[float] = deque(maxlen=size)
+        self._values = np.zeros(size)
+        self._size = size
+        self._pushed = 0
+        self._sum = 0.0
+        self._sum_sq = 0.0
         self.k = k
 
     def threshold(self) -> float | None:
-        if len(self.values) < self.values.maxlen // 3:
+        n = min(self._pushed, self._size)
+        if n < self._size // 3:
             return None  # still warming up
-        arr = np.fromiter(self.values, dtype=np.float64, count=len(self.values))
-        return float(arr.mean() + self.k * arr.std())
+        mean = self._sum / n
+        variance = max(self._sum_sq / n - mean * mean, 0.0)
+        return mean + self.k * math.sqrt(variance)
 
     def push(self, value: float) -> None:
-        self.values.append(value)
+        i = self._pushed % self._size
+        if self._pushed >= self._size:
+            old = self._values[i]
+            self._sum -= old
+            self._sum_sq -= old * old
+        self._values[i] = value
+        self._sum += value
+        self._sum_sq += value * value
+        self._pushed += 1
+        if self._pushed % self.RESUM_EVERY == 0:
+            filled = self._values[:min(self._pushed, self._size)]
+            self._sum = float(filled.sum())
+            self._sum_sq = float(filled @ filled)
+
+
+def _bin_range(mask: np.ndarray) -> slice:
+    """The contiguous FFT bins selected by ``mask``, as a slice (faster than masking)."""
+    bins = np.flatnonzero(mask)
+    return slice(int(bins[0]), int(bins[-1]) + 1) if bins.size else slice(0, 0)
+
+
+def _rms(x: np.ndarray) -> float:
+    return math.sqrt(float(x @ x) / x.size) if x.size else 0.0
+
+
+class _BandLevel:
+    """Level of one band: RMS magnitude normalized by a decaying peak, then
+    attack/release smoothed."""
+
+    def __init__(self, bins: slice, peak_decay: float, attack: float, release: float):
+        self.bins = bins
+        self._peak_decay = peak_decay
+        self._attack = attack
+        self._release = release
+        self._peak = LEVEL_FLOOR
+        self.level = 0.0
+
+    def update(self, mag: np.ndarray) -> float:
+        raw = _rms(mag[self.bins])
+        self._peak = max(raw, self._peak * self._peak_decay, LEVEL_FLOOR)
+        target = raw / self._peak
+        coeff = self._attack if target > self.level else self._release
+        self.level += coeff * (target - self.level)
+        return self.level
 
 
 class RealtimeAnalyzer:
@@ -105,11 +162,12 @@ class RealtimeAnalyzer:
         self._mag_scale = 2.0 / float(self.window.sum())  # full-scale sine -> ~1.0
 
         freqs = np.fft.rfftfreq(fft_size, 1.0 / sample_rate)
+        self._freqs = freqs
         nyquist = sample_rate / 2.0
-        self.band_masks = {
-            "bass": (freqs >= FREQ_BAND_BASS_MIN) & (freqs < FREQ_BAND_BASS_MAX),
-            "mid": (freqs >= FREQ_BAND_MID_MIN) & (freqs < FREQ_BAND_MID_MAX),
-            "high": (freqs >= FREQ_BAND_HIGH_MIN) & (freqs < min(FREQ_BAND_HIGH_MAX, nyquist)),
+        self.band_bins = {
+            "bass": _bin_range((freqs >= FREQ_BAND_BASS_MIN) & (freqs < FREQ_BAND_BASS_MAX)),
+            "mid": _bin_range((freqs >= FREQ_BAND_MID_MIN) & (freqs < FREQ_BAND_MID_MAX)),
+            "high": _bin_range((freqs >= FREQ_BAND_HIGH_MIN) & (freqs < min(FREQ_BAND_HIGH_MAX, nyquist))),
         }
 
         history = max(8, int(FLUX_HISTORY_S / self.hop_s))
@@ -122,13 +180,39 @@ class RealtimeAnalyzer:
         self._peak_decay = math.exp(-self.hop_s / LEVEL_PEAK_DECAY_S)
         self._attack = 1.0 - math.exp(-self.hop_s / LEVEL_ATTACK_S)
         self._release = 1.0 - math.exp(-self.hop_s / LEVEL_RELEASE_S)
-        self._band_peak = {name: LEVEL_FLOOR for name in self.band_masks}
-        self._band_level = {name: 0.0 for name in self.band_masks}
+        self._bands = {name: self._band_level(bins) for name, bins in self.band_bins.items()}
         self._prev_overall = 0.0
+        # User-selected band: (level tracker, (low_hz, high_hz)), swapped as a
+        # whole so another thread can change it between hops
+        self._custom: tuple[_BandLevel, tuple[float, float]] | None = None
 
         # Low-pass for kick attack localization (only run on kick hops)
         self._kick_lowpass = scipy_signal.butter(2, FREQ_BAND_BASS_MAX, btype="low", fs=sample_rate, output="sos")
         self._attack_span = min(fft_size, ATTACK_SEARCH_HOPS * hop_size)
+
+    def _band_level(self, bins: slice) -> _BandLevel:
+        return _BandLevel(bins, self._peak_decay, self._attack, self._release)
+
+    def set_custom_band(self, low_hz: float | None, high_hz: float | None = None) -> None:
+        """Track the level of ``low_hz``-``high_hz`` as ``custom_energy``.
+
+        Safe to call from any thread; ``None`` turns the custom band off. A
+        band narrower than one FFT bin uses the nearest bin.
+        """
+        if low_hz is None or high_hz is None:
+            self._custom = None
+            return
+        low_hz, high_hz = sorted((float(low_hz), float(high_hz)))
+        mask = (self._freqs >= low_hz) & (self._freqs < high_hz)
+        if not mask.any():
+            mask = np.zeros_like(mask)
+            mask[int(np.argmin(np.abs(self._freqs - (low_hz + high_hz) / 2)))] = True
+        self._custom = (self._band_level(_bin_range(mask)), (low_hz, high_hz))
+
+    @property
+    def custom_band_hz(self) -> tuple[float, float] | None:
+        custom = self._custom
+        return None if custom is None else custom[1]
 
     def _locate_kick_attack(self, frame: np.ndarray, timestamp_s: float) -> float:
         """Estimate when the kick started within the last few hops.
@@ -152,7 +236,7 @@ class RealtimeAnalyzer:
     def process(self, frame: np.ndarray, timestamp_s: float) -> HopResult:
         """Analyze one frame (``fft_size`` samples ending at ``timestamp_s``)."""
         hop = frame[-self.hop_size:]
-        raw_energy = min(1.0, float(np.sqrt(np.mean(hop.astype(np.float64) ** 2))))
+        raw_energy = min(1.0, _rms(hop.astype(np.float64)))
 
         mag = np.abs(np.fft.rfft(frame * self.window)) * self._mag_scale
         log_mag = np.log1p(1000.0 * mag)
@@ -163,8 +247,9 @@ class RealtimeAnalyzer:
         else:
             diff = np.maximum(log_mag - self._prev_log_mag, 0.0)
         self._prev_log_mag = log_mag
-        flux = float(diff.mean())
-        bass_flux = float(diff[self.band_masks["bass"]].mean())
+        flux = float(diff.sum()) / diff.size
+        bass = diff[self.band_bins["bass"]]
+        bass_flux = float(bass.sum()) / bass.size
 
         audible = raw_energy >= SILENCE_RMS
         onset_thr = self._flux.threshold()
@@ -186,20 +271,11 @@ class RealtimeAnalyzer:
 
         onset_strength = min(1.0, flux / (2.0 * onset_thr)) if onset_thr else 0.0
 
-        # Band levels: RMS magnitude per band, normalized by a decaying peak,
-        # then attack/release smoothed.
-        levels: dict[str, float] = {}
-        for name, mask in self.band_masks.items():
-            level = float(np.sqrt(np.mean(mag[mask] ** 2))) if mask.any() else 0.0
-            peak = max(level, self._band_peak[name] * self._peak_decay, LEVEL_FLOOR)
-            self._band_peak[name] = peak
-            target = level / peak
-            prev = self._band_level[name]
-            coeff = self._attack if target > prev else self._release
-            levels[name] = prev + coeff * (target - prev)
-        prev_bass = self._band_level["bass"]
-        self._band_level = levels
+        prev_bass = self._bands["bass"].level
+        levels = {name: band.update(mag) for name, band in self._bands.items()}
         overall = max(levels.values())
+        custom = self._custom
+        custom_level = custom[0].update(mag) if custom is not None else 0.0
 
         fast = FastFeatures(
             timestamp_s=timestamp_s,
@@ -216,6 +292,8 @@ class RealtimeAnalyzer:
             high_energy=levels["high"],
             bass_energy_delta=levels["bass"] - prev_bass,
             overall_energy_delta=overall - self._prev_overall,
+            custom_energy=custom_level,
+            custom_band_hz=custom[1] if custom is not None else None,
         )
         self._prev_overall = overall
         kick_time_s = self._locate_kick_attack(frame, timestamp_s) if kick else None
@@ -407,6 +485,9 @@ class RealtimeWorker(Worker):
         self.max_backlog_s = 0.0
         # Wall-clock age of the audio when analyzed (needs capture timestamps)
         self.audio_age_s = 0.0
+        # Smoothed analysis time per hop, as a fraction of the hop's duration
+        # (1.0 = the real-time path can only just keep up)
+        self.load = 0.0
         self._onset_count = 0
         self._kick_count = 0
         self._beat_count = 0
@@ -449,7 +530,10 @@ class RealtimeWorker(Worker):
                     continue
                 self.backlog_s = (available - position) / sr
                 self.max_backlog_s = max(self.max_backlog_s, self.backlog_s)
+                started = time.perf_counter()
                 self._process(frame, position / sr)
+                load = (time.perf_counter() - started) / self.analyzer.hop_s
+                self.load += LOAD_SMOOTHING * (load - self.load)
 
     def _process(self, frame: np.ndarray, t: float) -> None:
         hop = self.analyzer.process(frame, t)

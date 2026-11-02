@@ -43,6 +43,7 @@ reactions: they can only arrive after the sound.
 |---|---|---|---|
 | `raw_energy` | fast | 0–1 | RMS of the newest hop; jittery, best for meters |
 | `bass_energy`, `mid_energy`, `high_energy` | medium | 0–1 | smoothed (10 ms attack, 150 ms release), relative to each band's recent peak |
+| `custom_energy` | medium | 0–1 | the same, for a band you choose (`set_custom_band`, or the GUI sliders) |
 | `beat_phase` | fast | 0→1 | sawtooth: 0 on the beat, ramps up to the next one. Great for pulsing and easing |
 | `onset_strength` | fast | 0–1 | flux relative to the adaptive threshold (0.5 = at threshold) |
 | `spectral_density_low/mid/high` | slow | 0–1, sum ≈ 1 | spectral balance over ~2 s; good for palettes |

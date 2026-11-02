@@ -13,6 +13,7 @@ AudioPipeline(
     feature_cache: FeatureCache | None = None,  # share one across restarts
     use_processes: bool = True,               # BPM/key jobs in worker processes
     beat_lead_s: float | None = None,         # default: MOSHPRO_BEAT_LEAD_S
+    custom_band_hz: tuple[float, float] | None = None,  # see set_custom_band
 )
 ```
 
@@ -22,6 +23,8 @@ AudioPipeline(
 | `stop()` | stop everything and close the source (unblocks a waiting device read) |
 | `wait(timeout=None)` | wait until the source ends and is analyzed (final job results included) or the pipeline is stopped; re-raises a capture error such as a device failure or sample-rate mismatch |
 | `is_running() -> bool` | audio is still being captured or analyzed |
+| `set_custom_band(low_hz, high_hz)` | track an extra band as `MediumFeatures.custom_energy`; any thread, any time; `set_custom_band(None)` turns it off |
+| `stats() -> dict` | health snapshot: `running`, `uptime_s`, `audio_s`, `hops_processed`, `hops_skipped`, `load` (analysis time per hop ÷ hop duration), `backlog_s`, `max_backlog_s`, `audio_age_s`, `overflows` (`None` for non-device sources), and `jobs` (per job: `runs`, `skipped`, `last_compute_s`) |
 | `feature_cache` | the `FeatureCache` |
 | `get_events() -> list[(t, kind)]` | recent onset/beat events |
 | `get_latest_audio(duration_s) -> np.ndarray` | latest mono audio from the ring buffer |
@@ -76,7 +79,9 @@ Live sources expose `overflows` (blocks the driver reported as dropped).
 
 **`MediumFeatures`** (every hop): `bass_energy`, `mid_energy`, `high_energy`
 (0–1, relative to each band's recent peak), `bass_energy_delta`,
-`overall_energy_delta`.
+`overall_energy_delta`, `custom_energy` (same scale, for the band set with
+`set_custom_band`; 0 when none) and `custom_band_hz` (`[low, high]` or
+`null`).
 
 **`SlowFeatures`** (on each job result)
 

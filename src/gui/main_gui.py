@@ -5,12 +5,13 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 import logging
+import math
 import queue
 from threading import Thread
 from typing import Optional, Callable
 
-from src.config import AUDIO_BLOCK_SIZE, JOBS_USE_PROCESSES, DEFAULT_SAMPLE_RATE, FREQ_BAND_BASS_MIN, FREQ_BAND_BASS_MAX, FREQ_BAND_HIGH_MAX, API_HOST, API_PORT
-from src.engine import AudioPipeline, FeatureCache, get_performance_monitor, prewarm_job_processes
+from src.config import AUDIO_BLOCK_SIZE, JOBS_USE_PROCESSES, API_HOST, API_PORT
+from src.engine import AudioPipeline, FeatureCache, prewarm_job_processes
 from src.sources import AudioInputSource, ApplicationAudioSource, AudioChunk
 from src.gui.theme import apply_theme, BG, BG_PANEL, BG_CARD, FG, FG_DIM, ACCENT, ACCENT2, FONT_UI, FONT_BOLD, FONT_TITLE
 from src.gui.audio_devices import get_available_audio_devices, get_running_applications, AudioDevice
@@ -21,112 +22,106 @@ from src.api import AnalysisAPIServer
 
 logger = logging.getLogger(__name__)
 
+# The Performance panel refreshes every this many display updates (~0.5 s)
+PERF_REFRESH_TICKS = 10
+
 
 class FrequencyRangeSelector(ttk.Frame):
-    """Widget for selecting a frequency range with sliders."""
-    
-    def __init__(self, parent: tk.Widget, title: str = "Frequency Range", **kwargs):
+    """Custom band picker: two log-scale sliders and an on/off switch.
+
+    Calls ``on_change((low_hz, high_hz))`` when the band changes, or
+    ``on_change(None)`` when it is switched off.
+    """
+
+    MIN_HZ = 20.0
+    MAX_HZ = 20000.0
+    MIN_RATIO = 1.1  # keep the band at least ~1/6 octave wide
+
+    def __init__(
+        self,
+        parent: tk.Widget,
+        on_change: Callable[[tuple[float, float] | None], None] | None = None,
+        **kwargs,
+    ):
         """Initialize the frequency range selector.
-        
+
         Args:
             parent: Parent tkinter widget
-            title: Label for this selector
+            on_change: Callback with the new band, or None when disabled
             **kwargs: Additional frame arguments
         """
         super().__init__(parent, **kwargs)
-        self.title = title
-        self.min_hz = 20
-        self.max_hz = 20000
-        
-        # Title
-        title_label = ttk.Label(self, text=title, font=FONT_BOLD)
-        title_label.pack(anchor=tk.W, padx=5, pady=(5, 0))
-        
-        # Min frequency
-        min_frame = ttk.Frame(self)
-        min_frame.pack(fill=tk.X, padx=10, pady=3)
-        
-        ttk.Label(min_frame, text="Min (Hz):", width=12, font=FONT_UI).pack(side=tk.LEFT)
-        
-        self.min_var = tk.DoubleVar(value=FREQ_BAND_BASS_MIN)
-        self.min_scale = ttk.Scale(
-            min_frame,
-            from_=20,
-            to=10000,
-            variable=self.min_var,
-            orient=tk.HORIZONTAL,
-            command=self._on_min_change,
+        self.on_change = on_change
+
+        self.enabled_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            self, text="Track this band (Custom Band meter)", variable=self.enabled_var, command=self._notify
+        ).pack(anchor=tk.W, padx=5, pady=(0, 3))
+
+        # Defaults: the kick range, a common first choice
+        self.min_var = tk.DoubleVar(value=self._to_pos(40.0))
+        self.max_var = tk.DoubleVar(value=self._to_pos(120.0))
+        self.min_label = self._slider_row("Min:", self.min_var, self._on_min_change)
+        self.max_label = self._slider_row("Max:", self.max_var, self._on_max_change)
+        self._refresh_labels()
+
+    def _slider_row(self, text: str, var: tk.DoubleVar, command: Callable[[str], None]) -> ttk.Label:
+        row = ttk.Frame(self)
+        row.pack(fill=tk.X, padx=10, pady=3)
+        ttk.Label(row, text=text, width=6, font=FONT_UI).pack(side=tk.LEFT)
+        ttk.Scale(row, from_=0.0, to=1.0, variable=var, orient=tk.HORIZONTAL, command=command).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=5
         )
-        self.min_scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        
-        self.min_label = ttk.Label(min_frame, text=f"{self.min_var.get():.0f} Hz", width=10, font=FONT_UI)
-        self.min_label.pack(side=tk.LEFT)
-        
-        # Max frequency
-        max_frame = ttk.Frame(self)
-        max_frame.pack(fill=tk.X, padx=10, pady=3)
-        
-        ttk.Label(max_frame, text="Max (Hz):", width=12, font=FONT_UI).pack(side=tk.LEFT)
-        
-        self.max_var = tk.DoubleVar(value=FREQ_BAND_HIGH_MAX)
-        self.max_scale = ttk.Scale(
-            max_frame,
-            from_=100,
-            to=20000,
-            variable=self.max_var,
-            orient=tk.HORIZONTAL,
-            command=self._on_max_change,
-        )
-        self.max_scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        
-        self.max_label = ttk.Label(max_frame, text=f"{self.max_var.get():.0f} Hz", width=10, font=FONT_UI)
-        self.max_label.pack(side=tk.LEFT)
-        
-        # Range info
-        info_frame = ttk.Frame(self)
-        info_frame.pack(fill=tk.X, padx=10, pady=3)
-        
-        self.range_label = ttk.Label(
-            info_frame,
-            text=f"Range: {self.min_var.get():.0f} - {self.max_var.get():.0f} Hz",
-            font=FONT_UI,
-            foreground=FG_DIM,
-        )
-        self.range_label.pack(anchor=tk.W)
-    
-    def _on_min_change(self, value):
-        """Handle minimum frequency slider change."""
-        min_val = float(value)
-        max_val = self.max_var.get()
-        
-        # Ensure min < max
-        if min_val >= max_val:
-            self.min_var.set(max_val - 100)
-            min_val = self.min_var.get()
-        
-        self.min_label.config(text=f"{min_val:.0f} Hz")
-        self.range_label.config(text=f"Range: {min_val:.0f} - {max_val:.0f} Hz")
-    
-    def _on_max_change(self, value):
-        """Handle maximum frequency slider change."""
-        max_val = float(value)
-        min_val = self.min_var.get()
-        
-        # Ensure max > min
-        if max_val <= min_val:
-            self.max_var.set(min_val + 100)
-            max_val = self.max_var.get()
-        
-        self.max_label.config(text=f"{max_val:.0f} Hz")
-        self.range_label.config(text=f"Range: {min_val:.0f} - {max_val:.0f} Hz")
-    
+        label = ttk.Label(row, width=9, font=FONT_UI)
+        label.pack(side=tk.LEFT)
+        return label
+
+    # Slider position (0-1) <-> frequency, logarithmic like the ear
+    @classmethod
+    def _to_hz(cls, pos: float) -> float:
+        return cls.MIN_HZ * (cls.MAX_HZ / cls.MIN_HZ) ** pos
+
+    @classmethod
+    def _to_pos(cls, hz: float) -> float:
+        return math.log(hz / cls.MIN_HZ) / math.log(cls.MAX_HZ / cls.MIN_HZ)
+
+    def _on_min_change(self, _value: str) -> None:
+        low, high = self.get_range()
+        if low * self.MIN_RATIO > high:
+            self.min_var.set(self._to_pos(high / self.MIN_RATIO))
+        self._changed()
+
+    def _on_max_change(self, _value: str) -> None:
+        low, high = self.get_range()
+        if low * self.MIN_RATIO > high:
+            self.max_var.set(self._to_pos(min(low * self.MIN_RATIO, self.MAX_HZ)))
+        self._changed()
+
+    def _changed(self) -> None:
+        self._refresh_labels()
+        if self.enabled_var.get():
+            self._notify()
+
+    def _refresh_labels(self) -> None:
+        low, high = self.get_range()
+        self.min_label.config(text=_format_hz(low))
+        self.max_label.config(text=_format_hz(high))
+
+    def _notify(self) -> None:
+        if self.on_change:
+            self.on_change(self.get_band())
+
     def get_range(self) -> tuple[float, float]:
-        """Get the selected frequency range.
-        
-        Returns:
-            (min_hz, max_hz) tuple
-        """
-        return (self.min_var.get(), self.max_var.get())
+        """The slider positions as (min_hz, max_hz), whether enabled or not."""
+        return (self._to_hz(self.min_var.get()), self._to_hz(self.max_var.get()))
+
+    def get_band(self) -> tuple[float, float] | None:
+        """The selected band, or None when the custom band is switched off."""
+        return self.get_range() if self.enabled_var.get() else None
+
+
+def _format_hz(hz: float) -> str:
+    return f"{hz / 1000:.1f} kHz" if hz >= 1000 else f"{hz:.0f} Hz"
 
 
 class AudioInputSelector(ttk.Frame):
@@ -236,6 +231,15 @@ class AudioInputSelector(ttk.Frame):
 
 class AnalysisControlPanel(ttk.Frame):
     """Control panel for analysis settings and pipeline control."""
+
+    PERF_ROWS = {
+        "uptime": "Uptime",
+        "load": "Real-time load",
+        "backlog": "Backlog (max)",
+        "age": "Audio age",
+        "overflows": "Driver overflows",
+        "jobs": "Jobs",
+    }
     
     def __init__(self, parent: tk.Widget, on_start: Callable | None = None, on_stop: Callable | None = None, **kwargs):
         """Initialize the control panel.
@@ -288,19 +292,17 @@ class AnalysisControlPanel(ttk.Frame):
         )
         self.stop_button.pack(side=tk.LEFT, padx=5)
         
-        # Performance info frame
+        # Performance info frame (filled from AudioPipeline.stats())
         perf_frame = ttk.LabelFrame(self, text="Performance", padding=10)
         perf_frame.pack(fill=tk.X, padx=10, pady=5)
-        
+
         self.perf_labels = {
-            "chunks": ttk.Label(perf_frame, text="Chunks Processed: 0", font=FONT_UI),
-            "latency": ttk.Label(perf_frame, text="Avg Latency: 0.0ms", font=FONT_UI),
-            "uptime": ttk.Label(perf_frame, text="Uptime: 0.0s", font=FONT_UI),
+            key: ttk.Label(perf_frame, text=f"{title}: -", font=FONT_UI)
+            for key, title in self.PERF_ROWS.items()
         }
-        
         for label in self.perf_labels.values():
-            label.pack(anchor=tk.W, pady=2)
-    
+            label.pack(anchor=tk.W, pady=1)
+
     def _on_start_click(self) -> None:
         """Handle Start button click."""
         self.pipeline_running = True
@@ -323,17 +325,27 @@ class AnalysisControlPanel(ttk.Frame):
         if self.on_stop:
             self.on_stop()
     
-    def update_performance(self, chunks: int, avg_latency_ms: float, uptime_s: float) -> None:
-        """Update performance metrics.
-        
-        Args:
-            chunks: Number of chunks processed
-            avg_latency_ms: Average latency in milliseconds
-            uptime_s: Pipeline uptime in seconds
-        """
-        self.perf_labels["chunks"].config(text=f"Chunks Processed: {chunks}")
-        self.perf_labels["latency"].config(text=f"Avg Latency: {avg_latency_ms:.2f}ms")
-        self.perf_labels["uptime"].config(text=f"Uptime: {uptime_s:.1f}s")
+    def update_performance(self, stats: dict) -> None:
+        """Show a snapshot from :meth:`AudioPipeline.stats`."""
+        load = stats["load"]
+        overflows = stats["overflows"]
+        jobs = "  ".join(
+            f"{name} {job['last_compute_s'] * 1000:.0f}ms" + (f" ({job['skipped']} skipped)" if job["skipped"] else "")
+            for name, job in stats["jobs"].items() if job["runs"]
+        )
+        hops = f"{stats['hops_processed']} hops"
+        if stats["hops_skipped"]:
+            hops += f", {stats['hops_skipped']} skipped"
+        rows = {
+            "uptime": f"{stats['uptime_s']:.0f} s  ({hops})",
+            "load": f"{load * 100:.1f}% of real time" + ("  (too slow!)" if load > 0.8 else ""),
+            "backlog": f"{stats['backlog_s'] * 1000:.0f} ms  ({stats['max_backlog_s'] * 1000:.0f} ms)",
+            "age": f"{stats['audio_age_s'] * 1000:.0f} ms",
+            "overflows": "-" if overflows is None else str(overflows),
+            "jobs": jobs or "waiting for audio",
+        }
+        for key, text in rows.items():
+            self.perf_labels[key].config(text=f"{self.PERF_ROWS[key]}: {text}")
 
 
 class LocalApiPanel(ttk.Frame):
@@ -449,7 +461,7 @@ class AudioAnalysisGUI(tk.Tk):
         freq_frame = ttk.LabelFrame(left_panel, text="Custom Frequency Range", padding=10)
         freq_frame.pack(fill=tk.X, padx=0, pady=(0, 10))
         
-        self.freq_range_selector = FrequencyRangeSelector(freq_frame)
+        self.freq_range_selector = FrequencyRangeSelector(freq_frame, on_change=self._on_custom_band_change)
         self.freq_range_selector.pack(fill=tk.X)
         
         # Control panel
@@ -505,7 +517,7 @@ class AudioAnalysisGUI(tk.Tk):
         # periodic update loop (Tk widgets must only be touched from here)
         self._ui_queue: queue.SimpleQueue[Callable[[], None]] = queue.SimpleQueue()
         self.event_count = 0
-        self.chunk_count = 0
+        self._perf_tick = 0
         
         # Start periodic metrics update
         self._update_metrics_display()
@@ -529,6 +541,11 @@ class AudioAnalysisGUI(tk.Tk):
             logger.error(f"Error toggling local API: {e}")
             return str(e)
     
+    def _on_custom_band_change(self, band: tuple[float, float] | None) -> None:
+        """Apply the custom band to the running pipeline (the next start uses it too)."""
+        if self.pipeline is not None:
+            self.pipeline.set_custom_band(*(band or (None, None)))
+
     def _on_audio_device_change(self, device: AudioDevice) -> None:
         """Handle audio device selection change.
         
@@ -573,6 +590,7 @@ class AudioAnalysisGUI(tk.Tk):
                 sample_rate=self.selected_device.sample_rate,
                 event_callback=self._on_pipeline_event,
                 feature_cache=self.feature_cache,
+                custom_band_hz=self.freq_range_selector.get_band(),
             )
             
             # Start pipeline in separate thread
@@ -618,8 +636,6 @@ class AudioAnalysisGUI(tk.Tk):
             self.pipeline.stop()
             self.pipeline = None
             
-            # Show performance summary
-            perf = get_performance_monitor()
             self.analysis_logger.log_result(
                 operation="Pipeline Stopped",
                 value=0.0,
@@ -642,6 +658,10 @@ class AudioAnalysisGUI(tk.Tk):
             bpm_estimates = self.pipeline.feature_cache.get_bpm_estimates()
             if bpm_estimates:
                 self.last_bpm_estimates = bpm_estimates
+
+            self._perf_tick = (self._perf_tick + 1) % PERF_REFRESH_TICKS
+            if self._perf_tick == 0:
+                self.control_panel.update_performance(self.pipeline.stats())
         
         # Update the metrics display
         self.metrics_display.update_features(

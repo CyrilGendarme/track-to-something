@@ -212,3 +212,32 @@ def test_beat_tracker_emits_ahead_by_lookahead_with_exact_time() -> None:
     for t, b in late:
         assert 0.075 <= b - t <= 0.085                  # emitted ~80 ms ahead
         assert abs(((b - 0.1 + 0.25) % 0.5) - 0.25) < 0.002  # exact time on the grid
+
+
+def test_analyzer_custom_band_follows_its_range_and_can_change_live() -> None:
+    t = np.arange(SR * 2) / SR
+    tone = (0.5 * np.sin(2 * np.pi * 1000.0 * t)).astype(np.float32)  # steady 1 kHz
+    analyzer = RealtimeAnalyzer(SR, fft_size=1024, hop_size=256)
+
+    def run(start: int, hops: int) -> list:
+        return [analyzer.process(tone[end - 1024:end], end / SR).medium
+                for end in range(start + 1024, start + 1024 + hops * 256, 256)]
+
+    off = run(0, 20)
+    assert all(m.custom_energy == 0.0 and m.custom_band_hz is None for m in off)
+
+    analyzer.set_custom_band(800.0, 1200.0)
+    inside = run(20 * 256, 100)[-1]
+    assert inside.custom_band_hz == (800.0, 1200.0)
+    assert inside.custom_energy > 0.9
+
+    # Narrower than one FFT bin: falls back to the nearest bin, still tracks it
+    analyzer.set_custom_band(1001.0, 1002.0)
+    assert run(120 * 256, 100)[-1].custom_energy > 0.9
+
+    # A band with no energy settles near zero, relative to its own (floor) peak
+    analyzer.set_custom_band(5000.0, 8000.0)
+    assert run(220 * 256, 100)[-1].custom_energy < 0.1
+
+    analyzer.set_custom_band(None)
+    assert run(320 * 256, 1)[-1].custom_band_hz is None

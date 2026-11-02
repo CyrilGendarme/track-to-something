@@ -66,7 +66,7 @@ Any iterable of `src.sources.AudioChunk` works as a source; see
   can use any window length, independent of the device block size.
 - **Real-time path** (`src/engine/realtime.py`): sequential and stateful
   (spectral flux, adaptive thresholds, beat phase), so it runs in exactly one
-  thread. It costs well under a millisecond per hop.
+  thread. A hop costs about 0.15 ms, around 3% of real time.
 - **Beat tracking**: a phase-locked loop running at the consensus BPM. Each
   kick's attack is located inside the hop (to about 1 ms) and corrects both
   the beat phase and a small tempo offset, so a slightly-off BPM estimate
@@ -87,7 +87,7 @@ Any iterable of `src.sources.AudioChunk` works as a source; see
 | Group | Updated | Fields (highlights) |
 |---|---|---|
 | `fast` | every hop | `onset_detected`, `onset_strength`, `is_percussive_peak` (kick), `raw_energy`, `beat_detected`, `beat_phase`, `beat_confidence`, `tempo_bpm`, `predicted_next_beat_s`, `predicted_next_beat_unix_s`, `audio_age_s` |
-| `medium` | every hop | `bass_energy`, `mid_energy`, `high_energy` (0-1, relative to the band's recent peak), deltas |
+| `medium` | every hop | `bass_energy`, `mid_energy`, `high_energy` (0-1, relative to the band's recent peak), deltas, `custom_energy` (a band you pick: `pipeline.set_custom_band(40, 120)` or the GUI sliders) |
 | `slow` | on each job result | levels, `spectral_density_*`, `energy_trend`, `detected_key`, `key_confidence`, `estimated_bpm`, `beat_stability`, band envelopes |
 | `bpm_estimates` | every ~1 s | per-method BPM + confidence, plus the octave-aware consensus |
 
@@ -121,6 +121,7 @@ the upstream part.
 
 ```bash
 python -m pytest -q                      # synthetic audio, no files or devices needed
+                                         # pipeline.stats(): live load, backlog, overflows, job times
 python -m src.diagnostics.worker_debug   # real-time health check on a local file
 
 # Real hardware: play a known 128 BPM / C major signal into an output and

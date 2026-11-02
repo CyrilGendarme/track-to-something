@@ -19,15 +19,29 @@ system** loopback; it is not isolated to that app. **🔄 Refresh** re-scans.
 **Device Info** shows the channels, sample rate and type; the pipeline runs
 at the device's sample rate.
 
-**Custom Frequency Range.** The Min/Max sliders are not connected to the
-analysis yet; changing them has no effect. The analysis uses the fixed bands
-bass 20–250 Hz, mid 250–4000 Hz and high 4000–20000 Hz.
+**Custom Frequency Range.** Tick **Track this band** to follow one extra
+band of your choice, e.g. 40–120 Hz for the kick or 2–5 kHz for vocals and
+snares. Its level appears as **Custom Band** in the MEDIUM tab and as
+`custom_energy` in the API. The sliders are logarithmic (20 Hz–20 kHz), and
+the band always stays at least about 1/6 octave wide. Changes apply
+immediately, even while analysis is running. The fixed bands (bass 20–250 Hz,
+mid 250–4000 Hz, high 4000–20000 Hz) are unaffected.
 
 **Analysis Control.** **▶ Start Analysis** and **⏹ Stop Analysis**. Stop
 closes the device; Start opens it again. If the device fails to open, the
-error is logged and the controls reset. The **Performance** labels (chunks,
-latency, uptime) are not updated by the current engine; use the FAST tab's
-*Audio Age* or the diagnostics tools instead.
+error is logged and the controls reset.
+
+**Performance** (refreshed twice a second while running, from
+`AudioPipeline.stats()`):
+
+| Row | Meaning | Healthy |
+|---|---|---|
+| Uptime | time since Start, hops analyzed (and skipped, if any) | no skipped hops |
+| Real-time load | analysis time per hop as a share of the hop's duration | a few %; above 80 % it's flagged as too slow |
+| Backlog (max) | how far analysis trails the newest audio (worst so far) | under ~50 ms |
+| Audio age | how old the audio is when analyzed (device buffering included) | 10–40 ms on WASAPI |
+| Driver overflows | blocks the audio driver reported as dropped | 0 |
+| Jobs | last compute time of each background job; skipped runs if any | well under each job's interval |
 
 **Local API.** **Enable Local API** serves the data on
 `http://127.0.0.1:8768`. It's independent of Start/Stop and keeps serving
@@ -40,7 +54,7 @@ the last values while analysis is stopped. See [07](07_INTEGRATION.md).
 | Tab | Shows |
 |---|---|
 | FAST | raw energy, onset strength, kick strength, beat phase, beat lock, tracked tempo, beat count, audio age |
-| MEDIUM | bass/mid/high levels, bass delta |
+| MEDIUM | bass/mid/high levels, bass delta, custom band |
 | SLOW | amplitude, RMS, peak, spectral densities, key and confidence, BPM and stability, energy trend/average/variance |
 | BPM METHODS | each detector's BPM and confidence, plus the consensus |
 

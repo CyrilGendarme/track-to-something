@@ -117,3 +117,24 @@ def test_finite_source_gets_a_final_pass_of_every_job() -> None:
     _, _, slow = pipeline.feature_cache.get_all()
     assert slow.estimated_bpm == pytest.approx(BPM, abs=2.0)
     assert slow.detected_key == "C"
+
+
+def test_pipeline_reports_custom_band_and_stats() -> None:
+    y = kick_track(BPM, 4.0, SR)
+    pipeline = AudioPipeline(audio_source=chunked_source(y, SR, speed=None), sample_rate=SR,
+                             use_processes=False, custom_band_hz=(40.0, 120.0))
+    pipeline.start()
+    pipeline.wait(timeout=30.0)
+
+    _, medium, _ = pipeline.feature_cache.get_all()
+    assert medium.custom_band_hz == (40.0, 120.0)
+    assert 0.0 <= medium.custom_energy <= 1.0
+
+    stats = pipeline.stats()
+    assert stats["running"] is False
+    assert stats["audio_s"] == pytest.approx(4.0, abs=0.01)
+    assert stats["hops_processed"] == pipeline.realtime_worker.hops_processed > 0
+    assert 0.0 < stats["load"] < 1.0
+    assert stats["overflows"] is None  # not a live device
+    assert set(stats["jobs"]) == {"dynamics", "bpm", "bpm_librosa", "key"}
+    assert stats["jobs"]["key"]["runs"] >= 1

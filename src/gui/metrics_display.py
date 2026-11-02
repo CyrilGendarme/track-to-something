@@ -84,6 +84,7 @@ class RealTimeMetricsDisplay(ttk.Frame):
             "medium_mid": MetricField("Mid Energy", "mid_energy", "medium", "{:.3f}", "", True, 1.0),
             "medium_high": MetricField("High Energy", "high_energy", "medium", "{:.3f}", "", True, 1.0),
             "medium_bass_delta": MetricField("Bass Delta", "bass_energy_delta", "medium", "{:+.3f}", ""),
+            "medium_custom": MetricField("Custom Band", "custom_energy", "medium", "{:.3f}", "", True, 1.0),
             
             # SLOW TIER (background jobs)
             "slow_amplitude": MetricField("Amplitude", "overall_amplitude", "slow", "{:.3f}", "", True, 1.0),

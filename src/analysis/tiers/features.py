@@ -8,6 +8,7 @@ These dataclasses are the output contract of the pipeline (GUI + local API):
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
@@ -66,6 +67,10 @@ class MediumFeatures:
     # Energy rate of change (for smooth animation)
     bass_energy_delta: float      # Change in bass since last update
     overall_energy_delta: float   # Change in total energy
+
+    # User-selected band (AudioPipeline.set_custom_band), same normalization
+    custom_energy: float = 0.0
+    custom_band_hz: Optional[tuple[float, float]] = None  # None when no band is set
     
 
 @dataclass
