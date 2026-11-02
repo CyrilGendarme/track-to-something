@@ -28,8 +28,9 @@ from typing import Any
 from aiohttp import web
 
 from src.analysis.bpm_detectors import consensus_bpm
-from src.config import API_HOST, API_MAX_PUSH_HZ, API_PORT
+from src.config import API_HOST, API_MAX_PUSH_HZ, API_PORT, HIGH_RES_TIMER
 from src.engine.pipeline import FeatureCache
+from src.engine.priority import enable_high_resolution_timer
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +110,8 @@ class AnalysisAPIServer:
         """Start the server in a background thread. Safe to call if already running."""
         if self.is_running:
             return
+        if HIGH_RES_TIMER:
+            enable_high_resolution_timer()  # push pacing below ~16 ms needs it
         self._ready.clear()
         self._start_error = None
         self._thread = threading.Thread(target=self._run_loop, name="AnalysisAPIServer", daemon=True)

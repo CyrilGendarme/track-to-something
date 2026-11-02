@@ -9,9 +9,10 @@ from typing import Any, Callable
 import numpy as np
 from scipy import signal as scipy_signal
 
-from src.config import AUDIO_APPLY_HPF, AUDIO_BIT_DEPTH
+from src.config import AUDIO_APPLY_HPF, AUDIO_BIT_DEPTH, REALTIME_BOOST
 from src.engine.base import Worker
 from src.engine.buffer import RingBuffer
+from src.engine.priority import boost_current_thread
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,8 @@ class AudioCaptureWorker(Worker):
 
     def _work(self) -> None:
         """Capture audio until the source ends or stop is requested."""
+        if REALTIME_BOOST:
+            boost_current_thread()
         try:
             self._source = self.audio_source()
             for chunk in self._source:

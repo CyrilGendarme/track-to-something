@@ -10,7 +10,11 @@ Defaults marked † come from the latency profile (see below).
 
 | Variable | Default | Effect |
 |---|---|---|
-| `MOSHPRO_LATENCY_PROFILE` | balanced | `balanced`, `low` or `ultra`; see [Latency profiles](#latency-profiles) |
+| `MOSHPRO_LATENCY_PROFILE` | balanced | `balanced`, `low`, `ultra` or `crazy_ultra_amazing_waw`; see [Latency profiles](#latency-profiles) |
+| `MOSHPRO_HIGH_RES_TIMER` | false † | 1 ms Windows timer (needed for waits under ~16 ms) |
+| `MOSHPRO_REALTIME_BOOST` | false † | high process priority, time-critical audio threads |
+| `MOSHPRO_GIL_SWITCH_INTERVAL_S` | 0.005 † | Python GIL hand-off interval |
+| `MOSHPRO_DYNAMICS_IN_PROCESS` | false † | run the dynamics job in a worker process |
 | `MOSHPRO_SAMPLE_RATE` | 44100 | default sample rate when none is given |
 | `MOSHPRO_BLOCK_SIZE` | 512 † | device block size; bounds capture latency (512 @ 48 kHz = 10.7 ms) |
 | `MOSHPRO_DEVICE_LATENCY` | high † | driver buffering: `low`, `high` or seconds |
@@ -37,49 +41,59 @@ Defaults marked † come from the latency profile (see below).
 
 ## Latency profiles
 
-`MOSHPRO_LATENCY_PROFILE` trades CPU for latency in one setting. It only
-changes defaults: any variable in the table below still overrides it.
+`MOSHPRO_LATENCY_PROFILE` trades CPU for latency in one setting: `balanced`,
+`low`, `ultra` or `crazy_ultra_amazing_waw`. It only changes defaults: any
+variable in the table below still overrides it.
 
 ```powershell
 $env:MOSHPRO_LATENCY_PROFILE = "low"     # PowerShell; in cmd: set MOSHPRO_LATENCY_PROFILE=low
 python -m src.gui.main_gui
 ```
 
-| Setting | `balanced` (default) | `low` | `ultra` |
-|---|---|---|---|
-| `MOSHPRO_BLOCK_SIZE` (device block) | 512 | 256 | 128 |
-| `MOSHPRO_DEVICE_LATENCY` (driver buffering) | high | low | low |
-| `MOSHPRO_WASAPI_EXCLUSIVE` | false | false | true |
-| `MOSHPRO_REALTIME_HOP_SIZE` | 256 | 128 | 64 |
-| `MOSHPRO_ONSET_THRESHOLD_K` | 2.0 | 2.3 | 2.5 |
-| `MOSHPRO_DYNAMICS_INTERVAL_S` | 0.25 | 0.1 | 0.05 |
-| `MOSHPRO_BPM_INTERVAL_S` / `MOSHPRO_KEY_INTERVAL_S` | 1.0 / 2.0 | 0.5 / 1.0 | 0.5 / 1.0 |
-| `MOSHPRO_SCHEDULER_TICK_S` | 0.02 | 0.01 | 0.005 |
-| `MOSHPRO_GUI_REFRESH_MS` | 50 | 16 | 16 |
-| `MOSHPRO_API_MAX_PUSH_HZ` | 60 | 120 | 240 |
+`crazy_ultra_amazing_waw` (written "crazy" below) is the no-compromise one.
 
-Measured (48 kHz):
+| Setting | `balanced` (default) | `low` | `ultra` | crazy |
+|---|---|---|---|---|
+| `MOSHPRO_BLOCK_SIZE` (device block) | 512 | 256 | 128 | 64 |
+| `MOSHPRO_DEVICE_LATENCY` (driver buffering) | high | low | low | 0 (driver minimum) |
+| `MOSHPRO_WASAPI_EXCLUSIVE` | false | false | true | true |
+| `MOSHPRO_REALTIME_HOP_SIZE` | 256 | 128 | 64 | 64 |
+| `MOSHPRO_ONSET_THRESHOLD_K` | 2.0 | 2.3 | 2.5 | 2.5 |
+| `MOSHPRO_DYNAMICS_INTERVAL_S` | 0.25 | 0.1 | 0.05 | 0.025 |
+| `MOSHPRO_DYNAMICS_IN_PROCESS` | false | false | false | true |
+| `MOSHPRO_BPM_INTERVAL_S` / `MOSHPRO_KEY_INTERVAL_S` | 1.0 / 2.0 | 0.5 / 1.0 | 0.5 / 1.0 | 0.25 / 0.5 |
+| `MOSHPRO_SCHEDULER_TICK_S` | 0.02 | 0.01 | 0.005 | 0.002 |
+| `MOSHPRO_GUI_REFRESH_MS` | 50 | 16 | 16 | 8 |
+| `MOSHPRO_API_MAX_PUSH_HZ` | 60 | 120 | 240 | 480 |
+| `MOSHPRO_HIGH_RES_TIMER` | false | true | true | true |
+| `MOSHPRO_REALTIME_BOOST` | false | false | false | true |
+| `MOSHPRO_GIL_SWITCH_INTERVAL_S` | 0.005 | 0.005 | 0.005 | 0.0005 |
 
-| | `balanced` | `low` | `ultra` |
-|---|---|---|---|
-| Driver input latency, WASAPI | 22 ms (shared) | 22 ms (shared; Windows fixes it) | 5.3 ms (exclusive) |
-| Driver input latency, MME | 35 ms | 17 ms | 15 ms |
-| Audio age when analyzed (live, VB-Audio cable) | 22.5 ms | 21.8 ms | 5.9 ms |
-| Kick detection after the attack | 4.7 ms | 3.5 ms | 2.8 ms |
-| Onset detection after the attack | 5.1 ms | 4.1 ms | 3.5 ms |
-| GUI refresh / API push wait (worst case) | 50 / 17 ms | 16 / 8 ms | 16 / 4 ms |
-| Real-time path CPU (share of one core) | ~3% | ~5% | ~10% |
-| Background jobs | baseline | ~2x as often | ~2x as often, dynamics 5x |
+Measured live (48 kHz WASAPI input from a VB-Audio cable, worker processes
+and API running; each figure from `stats()`):
 
-All profiles detected every kick with 0 driver overflows and 0 skipped hops
-on the live test. Memory is unchanged: the buffers are sized in seconds.
+| | `balanced` | `low` | `ultra` | crazy |
+|---|---|---|---|---|
+| Driver input latency | 22 ms (shared) | 22 ms (shared; Windows fixes it) | 5.3 ms (exclusive) | 3.2 ms (exclusive) |
+| Driver input latency, MME devices | 35 ms | 17 ms | 15 ms | ≈15 ms |
+| **Audio age when analyzed** | **20 ms** | **22 ms** | **6.6 ms** | **4.4 ms** |
+| Kick / onset detection after the attack | 4.7 / 5.1 ms | 3.5 / 4.1 ms | 2.8 / 3.5 ms | 2.8 / 3.5 ms |
+| WebSocket messages delivered per second | 56 | 107 | 192 | ~345 |
+| GUI refresh | 50 ms | 16 ms | 16 ms | 8 ms |
+| Real-time load (`stats()["load"]`) | ~7% | ~15% | ~30% | ~45% |
+
+All profiles ran with 0 driver overflows and 0 skipped hops; the worst
+backlog stayed under 30 ms. Memory is unchanged: the buffers are sized in
+seconds. "Real-time load" is the real-time thread's time per hop (analysis,
+publishing and waiting for Python's GIL) as a share of the hop duration;
+keep it well under 100%.
 
 What each one gives up:
 
 - `low`: nothing much beyond CPU. On WASAPI shared mode the driver latency
-  can't go lower, so the gain there is detection and refresh only (about
-  20 ms less from sound to GUI, 5–10 ms less to the API); on MME it also
-  saves about 18 ms of driver buffering.
+  can't go lower, so the gain there is detection and refresh (about 20 ms
+  less from sound to GUI, 5–10 ms less to the API); on MME it also saves
+  about 18 ms of driver buffering.
 - `ultra`: **WASAPI exclusive** saves about 16 ms more, but while the
   analysis runs no other app can record from that input (e.g. OBS capturing
   the same device). If the device refuses (already in use, unsupported
@@ -88,11 +102,32 @@ What each one gives up:
   one you got. Set `MOSHPRO_WASAPI_EXCLUSIVE=false` to keep the rest of
   `ultra` without it. Smaller blocks and buffers leave less margin: if the
   Performance panel shows driver overflows, go back to `low`.
+- crazy: everything from `ultra`, plus the driver's minimum buffer, **high
+  process priority with time-critical audio threads** (can make other apps
+  stutter if the CPU is saturated), faster GIL hand-offs, and the dynamics
+  job in a worker process. About 2 ms less than `ultra`, for about 1.5x its
+  real-time load.
 - Smaller hops make onset detection slightly more sensitive; the profiles
   raise `MOSHPRO_ONSET_THRESHOLD_K` to keep the onset rate comparable. Kick
   detection (`MOSHPRO_KICK_THRESHOLD_K`) is unaffected.
-- `MOSHPRO_REALTIME_FFT_SIZE` is deliberately not in the profiles: 512 is too
-  coarse in the bass and breaks kick detection.
+
+Limits found while tuning (so you don't have to):
+
+- **Windows timers.** By default Windows wakes waiting threads every
+  ~15.6 ms, so any wait shorter than that (API push pacing, GUI refresh)
+  really lasts ~16 ms. `MOSHPRO_HIGH_RES_TIMER` raises the resolution to
+  1 ms and opts out of Windows 11's power throttling, which would otherwise
+  ignore that request for a background process.
+- **Hops below 64.** 32-sample hops detect 0.4 ms sooner offline, but live,
+  the per-hop overhead and GIL contention raised the audio age (7.5 ms vs
+  4.4 ms). That's why crazy stays at 64.
+- **Blocks below 64.** WASAPI exclusive bottoms out at 3.2 ms (the driver's
+  period); smaller blocks only add callbacks.
+- **`MOSHPRO_REALTIME_FFT_SIZE`** is deliberately not in the profiles: 512 is
+  too coarse in the bass and breaks kick detection.
+- **Frequent jobs in threads.** The dynamics job every 25 ms in a thread
+  starved the real-time thread of the GIL (audio age 148 ms); crazy runs it
+  in a worker process.
 
 Note: the GUI currently lists only 44.1 kHz devices, which on many machines
 means MME/DirectSound entries; WASAPI devices running at 48 kHz (where

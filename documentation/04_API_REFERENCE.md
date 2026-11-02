@@ -24,7 +24,7 @@ AudioPipeline(
 | `wait(timeout=None)` | wait until the source ends and is analyzed (final job results included) or the pipeline is stopped; re-raises a capture error such as a device failure or sample-rate mismatch |
 | `is_running() -> bool` | audio is still being captured or analyzed |
 | `set_custom_band(low_hz, high_hz)` | track an extra band as `MediumFeatures.custom_energy`; any thread, any time; `set_custom_band(None)` turns it off |
-| `stats() -> dict` | health snapshot: `running`, `uptime_s`, `audio_s`, `hops_processed`, `hops_skipped`, `load` (analysis time per hop ÷ hop duration), `backlog_s`, `max_backlog_s`, `audio_age_s`, `input_dbfs` (input level over the last second), `overflows` (`None` for non-device sources), `latency_profile`, `block_size`, `hop_size`, `wasapi_exclusive` (whether exclusive mode was granted; `None` for non-device sources), and `jobs` (per job: `runs`, `skipped`, `last_compute_s`) |
+| `stats() -> dict` | health snapshot: `running`, `uptime_s`, `audio_s`, `hops_processed`, `hops_skipped`, `load` (analysis time per hop ÷ hop duration), `backlog_s`, `max_backlog_s`, `audio_age_s`, `input_dbfs` (input level over the last second), `overflows` (`None` for non-device sources), `latency_profile`, `block_size`, `hop_size`, `wasapi_exclusive` (whether exclusive mode was granted; `None` for non-device sources), `high_res_timer`, `realtime_boost`, and `jobs` (per job: `runs`, `skipped`, `last_compute_s`) |
 | `feature_cache` | the `FeatureCache` |
 | `get_events() -> list[(t, kind)]` | recent onset/beat events |
 | `get_latest_audio(duration_s) -> np.ndarray` | latest mono audio from the ring buffer |

@@ -34,11 +34,13 @@ from src.config import (
     KICK_THRESHOLD_K,
     ONSET_THRESHOLD_K,
     REALTIME_FFT_SIZE,
+    REALTIME_BOOST,
     REALTIME_HOP_SIZE,
     SILENCE_RMS,
 )
 from src.engine.base import Worker
 from src.engine.buffer import RingBuffer
+from src.engine.priority import boost_current_thread
 
 logger = logging.getLogger(__name__)
 
@@ -536,6 +538,8 @@ class RealtimeWorker(Worker):
                 logger.exception("[%s] event callback failed", self.name)
 
     def _work(self) -> None:
+        if REALTIME_BOOST:
+            boost_current_thread()
         sr = self.buffer.sample_rate
         position = 0  # absolute end sample of the next hop to analyze
         while not self.is_stopped():

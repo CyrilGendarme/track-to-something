@@ -10,8 +10,9 @@ import queue
 from threading import Thread
 from typing import Optional, Callable
 
-from src.config import AUDIO_BLOCK_SIZE, GUI_REFRESH_MS, JOBS_USE_PROCESSES, API_HOST, API_PORT
+from src.config import AUDIO_BLOCK_SIZE, GUI_REFRESH_MS, HIGH_RES_TIMER, JOBS_USE_PROCESSES, API_HOST, API_PORT
 from src.engine import AudioPipeline, FeatureCache, prewarm_job_processes
+from src.engine.priority import enable_high_resolution_timer
 from src.sources import AudioInputSource, ApplicationAudioSource, AudioChunk
 from src.gui.theme import apply_theme, BG, BG_PANEL, BG_CARD, FG, FG_DIM, ACCENT, ACCENT2, FONT_UI, FONT_BOLD, FONT_TITLE
 from src.gui.audio_devices import get_available_audio_devices, get_running_applications, AudioDevice
@@ -345,7 +346,9 @@ class AnalysisControlPanel(ttk.Frame):
         input_dbfs = stats["input_dbfs"]
         input_note = "  (very quiet: is the music reaching this input?)" if input_dbfs < QUIET_DBFS else ""
         profile = f"{stats['latency_profile']}  (block {stats['block_size'] or '-'}, hop {stats['hop_size']}"
-        profile += ", WASAPI exclusive)" if stats["wasapi_exclusive"] else ")"
+        extras = [name for name, on in (("WASAPI exclusive", stats["wasapi_exclusive"]),
+                                         ("boosted", stats["realtime_boost"])) if on]
+        profile += "".join(f", {extra}" for extra in extras) + ")"
         rows = {
             "profile": profile,
             "input": f"{input_dbfs:.0f} dBFS{input_note}",
@@ -513,6 +516,9 @@ class AudioAnalysisGUI(tk.Tk):
         # (librosa import) then overlaps with the user picking a device.
         if JOBS_USE_PROCESSES:
             prewarm_job_processes()
+        # Tk's after() can't fire faster than ~16 ms without it
+        if HIGH_RES_TIMER:
+            enable_high_resolution_timer()
         
         # Persistent feature cache: outlives individual pipeline start/stop
         # cycles so the local API can keep serving the latest data regardless

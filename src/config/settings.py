@@ -19,8 +19,13 @@ from typing import Final
 #   balanced  the reference setup: lowest CPU, robust on any driver
 #   low       ~2x the real-time CPU; smaller device buffers, finer analysis
 #             steps, faster job/GUI/API refresh
-#   ultra     ~4x the real-time CPU (about 10% of one core); smallest
-#             buffers and WASAPI exclusive mode where available
+#   ultra     ~4x the real-time CPU (about 10% of one core); small buffers
+#             and WASAPI exclusive mode where available
+#   crazy_ultra_amazing_waw
+#             the driver's minimum buffer, 125 Hz GUI, 480 Hz API, high
+#             process priority, time-critical audio threads, faster GIL
+#             hand-offs, dynamics job in a worker process. Live: audio age
+#             ~4.5 ms (balanced ~20 ms), real-time load ~45% (balanced ~7%)
 LATENCY_PROFILES: Final[dict[str, dict[str, str]]] = {
     "balanced": {
         "BLOCK_SIZE": "512",
@@ -34,6 +39,10 @@ LATENCY_PROFILES: Final[dict[str, dict[str, str]]] = {
         "SCHEDULER_TICK_S": "0.02",
         "GUI_REFRESH_MS": "50",
         "API_MAX_PUSH_HZ": "60",
+        "HIGH_RES_TIMER": "false",
+        "REALTIME_BOOST": "false",
+        "GIL_SWITCH_INTERVAL_S": "0.005",
+        "DYNAMICS_IN_PROCESS": "false",
     },
     "low": {
         "BLOCK_SIZE": "256",
@@ -47,6 +56,10 @@ LATENCY_PROFILES: Final[dict[str, dict[str, str]]] = {
         "SCHEDULER_TICK_S": "0.01",
         "GUI_REFRESH_MS": "16",
         "API_MAX_PUSH_HZ": "120",
+        "HIGH_RES_TIMER": "true",
+        "REALTIME_BOOST": "false",
+        "GIL_SWITCH_INTERVAL_S": "0.005",
+        "DYNAMICS_IN_PROCESS": "false",
     },
     "ultra": {
         "BLOCK_SIZE": "128",
@@ -60,6 +73,29 @@ LATENCY_PROFILES: Final[dict[str, dict[str, str]]] = {
         "SCHEDULER_TICK_S": "0.005",
         "GUI_REFRESH_MS": "16",
         "API_MAX_PUSH_HZ": "240",
+        "HIGH_RES_TIMER": "true",
+        "REALTIME_BOOST": "false",
+        "GIL_SWITCH_INTERVAL_S": "0.005",
+        "DYNAMICS_IN_PROCESS": "false",
+    },
+    "crazy_ultra_amazing_waw": {
+        "BLOCK_SIZE": "64",
+        "DEVICE_LATENCY": "0",  # the driver's minimum (WASAPI exclusive: 3.2 ms)
+        "WASAPI_EXCLUSIVE": "true",
+        # 32 detects 0.4 ms sooner offline, but live its per-hop overhead and
+        # GIL contention cost more than that (audio age 7.5 vs 4.5 ms)
+        "REALTIME_HOP_SIZE": "64",
+        "ONSET_THRESHOLD_K": "2.5",
+        "DYNAMICS_INTERVAL_S": "0.025",
+        "BPM_INTERVAL_S": "0.25",
+        "KEY_INTERVAL_S": "0.5",
+        "SCHEDULER_TICK_S": "0.002",
+        "GUI_REFRESH_MS": "8",
+        "API_MAX_PUSH_HZ": "480",
+        "HIGH_RES_TIMER": "true",
+        "REALTIME_BOOST": "true",
+        "GIL_SWITCH_INTERVAL_S": "0.0005",
+        "DYNAMICS_IN_PROCESS": "true",
     },
 }
 
@@ -174,6 +210,28 @@ KEY_HISTORY_SIZE: Final[int] = int(os.getenv("MOSHPRO_KEY_HISTORY_SIZE", "4"))
 
 # How often the scheduler checks whether a job is due (seconds).
 SCHEDULER_TICK_S: Final[float] = float(_profiled("SCHEDULER_TICK_S"))
+
+# ────────────────────────────────────────────────────────────────────────────
+# SCHEDULING (Windows)
+# ────────────────────────────────────────────────────────────────────────────
+
+# Raise the Windows timer resolution to 1 ms. Without it, any wait shorter
+# than ~16 ms (API push pacing, GUI refresh) really lasts ~16 ms. Costs a
+# little power.
+HIGH_RES_TIMER: Final[bool] = _profiled("HIGH_RES_TIMER").lower() == "true"
+
+# High process priority and time-critical capture / real-time threads. Less
+# jitter under load, but can starve other apps if the CPU is saturated.
+REALTIME_BOOST: Final[bool] = _profiled("REALTIME_BOOST").lower() == "true"
+
+# How long a Python thread may hold the GIL before handing it to a waiting
+# one (Python's default: 5 ms). With very small hops the real-time thread
+# needs it more often than that; shorter values cost a little throughput.
+GIL_SWITCH_INTERVAL_S: Final[float] = float(_profiled("GIL_SWITCH_INTERVAL_S"))
+
+# Run the dynamics job in a worker process instead of a thread, so frequent
+# runs don't compete with the real-time thread for the GIL.
+DYNAMICS_IN_PROCESS: Final[bool] = _profiled("DYNAMICS_IN_PROCESS").lower() == "true"
 
 # Run heavy jobs in worker processes (true parallelism, no GIL contention with
 # the real-time thread). Set to "false" to use threads (e.g. for debugging).

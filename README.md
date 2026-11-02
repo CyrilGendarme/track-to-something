@@ -112,10 +112,12 @@ All settings live in `src/config/settings.py` and can be overridden with
 windows (`MOSHPRO_BPM_INTERVAL_S`, `MOSHPRO_KEY_WINDOW_S`, …), and
 `MOSHPRO_JOBS_USE_PROCESSES=false` to run every job in threads.
 
-`MOSHPRO_LATENCY_PROFILE` (`balanced`, `low`, `ultra`) trades CPU for latency
-in one setting: smaller device buffers, finer analysis steps, faster job,
-GUI and API refresh, and for `ultra` WASAPI exclusive mode. Measured audio
-age at analysis: 22.5 ms (`balanced`) vs 5.9 ms (`ultra`); details in
+`MOSHPRO_LATENCY_PROFILE` (`balanced`, `low`, `ultra`,
+`crazy_ultra_amazing_waw`) trades CPU for latency in one setting: smaller
+device buffers, finer analysis steps, faster job, GUI and API refresh, WASAPI
+exclusive mode, and for the last one high priority audio threads. Measured
+audio age at analysis: 20 ms (`balanced`), 6.6 ms (`ultra`), 4.4 ms
+(`crazy_ultra_amazing_waw`); details in
 [09](documentation/09_CONFIGURATION_AND_DIAGNOSTICS.md#latency-profiles).
 
 `MOSHPRO_BEAT_LEAD_S` emits beats earlier to cover latency the engine can't

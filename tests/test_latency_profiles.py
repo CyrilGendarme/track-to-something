@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 
 import numpy as np
 import pytest
@@ -21,7 +22,8 @@ def _settings(**env: str) -> dict:
     """Resolve the settings in a fresh interpreter (they are read at import)."""
     code = ("import json; from src import config as c; print(json.dumps({k: getattr(c, k) for k in "
             "('LATENCY_PROFILE', 'AUDIO_BLOCK_SIZE', 'DEVICE_LATENCY', 'WASAPI_EXCLUSIVE', "
-            "'REALTIME_HOP_SIZE', 'ONSET_THRESHOLD_K', 'KICK_THRESHOLD_K', 'GUI_REFRESH_MS')}))")
+            "'REALTIME_HOP_SIZE', 'ONSET_THRESHOLD_K', 'KICK_THRESHOLD_K', 'GUI_REFRESH_MS', "
+            "'HIGH_RES_TIMER', 'REALTIME_BOOST')}))")
     clean = {k: v for k, v in os.environ.items() if not k.startswith("MOSHPRO_")}
     result = subprocess.run([sys.executable, "-c", code], env={**clean, **env},
                             capture_output=True, text=True, timeout=60)
@@ -39,6 +41,11 @@ def test_profiles_set_defaults_and_variables_still_override() -> None:
     assert (ultra["AUDIO_BLOCK_SIZE"], ultra["REALTIME_HOP_SIZE"], ultra["DEVICE_LATENCY"]) == (128, 64, "low")
     assert ultra["WASAPI_EXCLUSIVE"] is True
     assert ultra["KICK_THRESHOLD_K"] == 2.0  # kicks keep their threshold
+
+    crazy = _settings(MOSHPRO_LATENCY_PROFILE="crazy_ultra_amazing_waw")
+    assert (crazy["AUDIO_BLOCK_SIZE"], crazy["REALTIME_HOP_SIZE"], crazy["DEVICE_LATENCY"]) == (64, 64, 0.0)
+    assert crazy["GUI_REFRESH_MS"] == 8 and crazy["HIGH_RES_TIMER"] and crazy["REALTIME_BOOST"]
+    assert not balanced["HIGH_RES_TIMER"] and not balanced["REALTIME_BOOST"]
 
     custom = _settings(MOSHPRO_LATENCY_PROFILE="Low", MOSHPRO_REALTIME_HOP_SIZE="64", MOSHPRO_DEVICE_LATENCY="0.01")
     assert custom["AUDIO_BLOCK_SIZE"] == 256 and custom["REALTIME_HOP_SIZE"] == 64
@@ -63,7 +70,7 @@ def _kick_delays(hop: int) -> np.ndarray:
 
 def test_smaller_hops_detect_every_kick_sooner() -> None:
     reference = _kick_delays(256)
-    for hop in (128, 64):
+    for hop in (128, 64, 32):
         delays = _kick_delays(hop)  # raises IndexError if a kick was missed
         assert len(delays) == len(reference)
         assert np.median(delays) < np.median(reference)
@@ -110,3 +117,27 @@ def test_wasapi_exclusive_only_where_supported_with_fallback(host_api, refuse, e
     assert source.exclusive is expect_exclusive
     assert (stream["extra_settings"] is not None) is expect_exclusive
     assert stream["latency"] == "low"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows scheduling APIs")
+def test_high_resolution_timer_makes_short_sleeps_short() -> None:
+    import asyncio
+    import time
+
+    from src.engine.priority import boost_current_thread, enable_high_resolution_timer
+
+    assert enable_high_resolution_timer()
+
+    async def sleeps() -> float:
+        started = time.perf_counter()
+        for _ in range(20):
+            await asyncio.sleep(0.004)
+        return (time.perf_counter() - started) / 20
+
+    assert asyncio.run(sleeps()) < 0.010  # ~16 ms without the 1 ms timer
+
+    result: list[bool] = []
+    thread = threading.Thread(target=lambda: result.append(boost_current_thread()))
+    thread.start()
+    thread.join()
+    assert result == [True]

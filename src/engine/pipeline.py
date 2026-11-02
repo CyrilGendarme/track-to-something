@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 import threading
 import time
 from typing import Callable, Optional
@@ -39,16 +40,21 @@ from src.config import (
     BPM_WINDOW_S,
     BUFFER_CAPACITY_SECONDS,
     DEFAULT_SAMPLE_RATE,
+    DYNAMICS_IN_PROCESS,
     DYNAMICS_INTERVAL_S,
     DYNAMICS_WINDOW_S,
     JOBS_USE_PROCESSES,
     KEY_HISTORY_SIZE,
     KEY_INTERVAL_S,
+    GIL_SWITCH_INTERVAL_S,
+    HIGH_RES_TIMER,
     KEY_WINDOW_S,
     LATENCY_PROFILE,
+    REALTIME_BOOST,
 )
 from .buffer import RingBuffer
 from .capture_worker import AudioCaptureWorker
+from .priority import boost_process, enable_high_resolution_timer
 from .realtime import RealtimeWorker
 from .scheduler import AnalysisJob, JobResult, JobScheduler, ProcessPoolSpec, shared_process_pool
 
@@ -239,7 +245,8 @@ class AudioPipeline:
         librosa_pool = LIBROSA_POOL if use_processes else None
         self.jobs = [
             AnalysisJob("dynamics", analyze_dynamics, DYNAMICS_INTERVAL_S, DYNAMICS_WINDOW_S,
-                        self._on_dynamics, min_window_s=0.5),
+                        self._on_dynamics, min_window_s=0.5,
+                        process_pool=signal_pool if DYNAMICS_IN_PROCESS else None),
             AnalysisJob("bpm", analyze_signal_methods, BPM_INTERVAL_S, BPM_WINDOW_S,
                         self._on_bpm, process_pool=signal_pool, min_window_s=2.0),
             AnalysisJob("bpm_librosa", analyze_librosa_methods, BPM_INTERVAL_S, BPM_WINDOW_S,
@@ -285,6 +292,8 @@ class AudioPipeline:
             "block_size": getattr(source, "block_size", None),
             "hop_size": rt.hop_size,
             "wasapi_exclusive": getattr(source, "exclusive", None),
+            "high_res_timer": HIGH_RES_TIMER,
+            "realtime_boost": REALTIME_BOOST,
             "jobs": {
                 job.name: {"runs": job.runs, "skipped": job.skipped, "last_compute_s": job.last_compute_s}
                 for job in self.jobs
@@ -367,6 +376,12 @@ class AudioPipeline:
             return self
         logger.info("Starting audio pipeline (ring buffer %.1fs @ %d Hz)",
                     self.audio_buffer.capacity / self.sample_rate, self.sample_rate)
+        if HIGH_RES_TIMER:
+            enable_high_resolution_timer()
+        if REALTIME_BOOST:
+            boost_process()
+        if sys.getswitchinterval() != GIL_SWITCH_INTERVAL_S:
+            sys.setswitchinterval(GIL_SWITCH_INTERVAL_S)  # process-wide
         self._running = True
         self._started_at = time.monotonic()
         self.capture_worker.start()

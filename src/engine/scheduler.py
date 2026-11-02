@@ -175,7 +175,8 @@ class JobScheduler(Worker):
                 if window.size < job.min_window_s * sr or not np.any(window):
                     continue
                 self._submit(job, window, end)
-            self._stop_event.wait(SCHEDULER_TICK_S)
+            # time.sleep is precise on Windows; Event.wait rounds up to ~16 ms
+            time.sleep(SCHEDULER_TICK_S)
 
     def _submit(self, job: AnalysisJob, window: np.ndarray, end: int) -> None:
         sr = self.buffer.sample_rate
