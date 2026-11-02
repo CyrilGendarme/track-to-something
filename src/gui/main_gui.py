@@ -10,7 +10,7 @@ import queue
 from threading import Thread
 from typing import Optional, Callable
 
-from src.config import AUDIO_BLOCK_SIZE, JOBS_USE_PROCESSES, API_HOST, API_PORT
+from src.config import AUDIO_BLOCK_SIZE, GUI_REFRESH_MS, JOBS_USE_PROCESSES, API_HOST, API_PORT
 from src.engine import AudioPipeline, FeatureCache, prewarm_job_processes
 from src.sources import AudioInputSource, ApplicationAudioSource, AudioChunk
 from src.gui.theme import apply_theme, BG, BG_PANEL, BG_CARD, FG, FG_DIM, ACCENT, ACCENT2, FONT_UI, FONT_BOLD, FONT_TITLE
@@ -23,7 +23,7 @@ from src.api import AnalysisAPIServer
 logger = logging.getLogger(__name__)
 
 # The Performance panel refreshes every this many display updates (~0.5 s)
-PERF_REFRESH_TICKS = 10
+PERF_REFRESH_TICKS = max(1, round(500 / GUI_REFRESH_MS))
 # Input level warning threshold. Music normally sits around -30..-10 dBFS;
 # near the silence gate (SILENCE_RMS, -60 dBFS) kicks are ignored, so there is
 # no beat phase or lock and the level meters stay at their floor.
@@ -237,6 +237,7 @@ class AnalysisControlPanel(ttk.Frame):
     """Control panel for analysis settings and pipeline control."""
 
     PERF_ROWS = {
+        "profile": "Latency profile",
         "input": "Input level",
         "uptime": "Uptime",
         "load": "Real-time load",
@@ -343,7 +344,10 @@ class AnalysisControlPanel(ttk.Frame):
             hops += f", {stats['hops_skipped']} skipped"
         input_dbfs = stats["input_dbfs"]
         input_note = "  (very quiet: is the music reaching this input?)" if input_dbfs < QUIET_DBFS else ""
+        profile = f"{stats['latency_profile']}  (block {stats['block_size'] or '-'}, hop {stats['hop_size']}"
+        profile += ", WASAPI exclusive)" if stats["wasapi_exclusive"] else ")"
         rows = {
+            "profile": profile,
             "input": f"{input_dbfs:.0f} dBFS{input_note}",
             "uptime": f"{stats['uptime_s']:.0f} s  ({hops})",
             "load": f"{load * 100:.1f}% of real time" + ("  (too slow!)" if load > 0.8 else ""),
@@ -680,8 +684,8 @@ class AudioAnalysisGUI(tk.Tk):
         )
         self.metrics_display.update_bpm_estimates(self.last_bpm_estimates)
         
-        # Schedule next update (every 50ms = ~20 FPS)
-        self.after(50, self._update_metrics_display)
+        # Schedule next update (MOSHPRO_GUI_REFRESH_MS, from the latency profile)
+        self.after(GUI_REFRESH_MS, self._update_metrics_display)
     
     def _drain_ui_queue(self) -> None:
         """Run work posted by pipeline threads (on the Tk thread)."""

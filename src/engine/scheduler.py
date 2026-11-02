@@ -26,12 +26,12 @@ from typing import Any, Callable
 
 import numpy as np
 
+from src.config import SCHEDULER_TICK_S
 from src.engine.base import Worker
 from src.engine.buffer import RingBuffer
 
 logger = logging.getLogger(__name__)
 
-TICK_S = 0.02
 
 
 @dataclass
@@ -175,7 +175,7 @@ class JobScheduler(Worker):
                 if window.size < job.min_window_s * sr or not np.any(window):
                     continue
                 self._submit(job, window, end)
-            self._stop_event.wait(TICK_S)
+            self._stop_event.wait(SCHEDULER_TICK_S)
 
     def _submit(self, job: AnalysisJob, window: np.ndarray, end: int) -> None:
         sr = self.buffer.sample_rate

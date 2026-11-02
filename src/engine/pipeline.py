@@ -45,6 +45,7 @@ from src.config import (
     KEY_HISTORY_SIZE,
     KEY_INTERVAL_S,
     KEY_WINDOW_S,
+    LATENCY_PROFILE,
 )
 from .buffer import RingBuffer
 from .capture_worker import AudioCaptureWorker
@@ -280,6 +281,10 @@ class AudioPipeline:
             "audio_age_s": rt.audio_age_s,
             "input_dbfs": rt.input_dbfs,
             "overflows": getattr(source, "overflows", None),
+            "latency_profile": LATENCY_PROFILE,
+            "block_size": getattr(source, "block_size", None),
+            "hop_size": rt.hop_size,
+            "wasapi_exclusive": getattr(source, "exclusive", None),
             "jobs": {
                 job.name: {"runs": job.runs, "skipped": job.skipped, "last_compute_s": job.last_compute_s}
                 for job in self.jobs

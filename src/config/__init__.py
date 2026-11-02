@@ -9,9 +9,14 @@ Example:
 """
 
 from .settings import (
+    # Latency profile
+    LATENCY_PROFILE,
+    LATENCY_PROFILES,
     # Audio capture
     DEFAULT_SAMPLE_RATE,
     AUDIO_BLOCK_SIZE,
+    DEVICE_LATENCY,
+    WASAPI_EXCLUSIVE,
     AUDIO_BIT_DEPTH,
     AUDIO_APPLY_HPF,
     # Buffer
@@ -22,6 +27,7 @@ from .settings import (
     ONSET_MIN_INTERVAL_S,
     KICK_MIN_INTERVAL_S,
     ONSET_THRESHOLD_K,
+    KICK_THRESHOLD_K,
     SILENCE_RMS,
     BEAT_LEAD_S,
     # Background jobs
@@ -32,6 +38,7 @@ from .settings import (
     KEY_INTERVAL_S,
     KEY_WINDOW_S,
     KEY_HISTORY_SIZE,
+    SCHEDULER_TICK_S,
     JOBS_USE_PROCESSES,
     # Frequency bands
     FREQ_BAND_BASS_MIN,
@@ -43,8 +50,9 @@ from .settings import (
     # Offline analysis
     STFT_FFT_SIZE,
     STFT_HOP_LENGTH,
-    # Logging
+    # Logging / GUI
     LOG_LEVEL,
+    GUI_REFRESH_MS,
     # Local API
     API_HOST,
     API_PORT,
@@ -52,8 +60,12 @@ from .settings import (
 )
 
 __all__ = [
+    "LATENCY_PROFILE",
+    "LATENCY_PROFILES",
     "DEFAULT_SAMPLE_RATE",
     "AUDIO_BLOCK_SIZE",
+    "DEVICE_LATENCY",
+    "WASAPI_EXCLUSIVE",
     "AUDIO_BIT_DEPTH",
     "AUDIO_APPLY_HPF",
     "BUFFER_CAPACITY_SECONDS",
@@ -62,6 +74,7 @@ __all__ = [
     "ONSET_MIN_INTERVAL_S",
     "KICK_MIN_INTERVAL_S",
     "ONSET_THRESHOLD_K",
+    "KICK_THRESHOLD_K",
     "SILENCE_RMS",
     "BEAT_LEAD_S",
     "DYNAMICS_INTERVAL_S",
@@ -71,6 +84,7 @@ __all__ = [
     "KEY_INTERVAL_S",
     "KEY_WINDOW_S",
     "KEY_HISTORY_SIZE",
+    "SCHEDULER_TICK_S",
     "JOBS_USE_PROCESSES",
     "FREQ_BAND_BASS_MIN",
     "FREQ_BAND_BASS_MAX",
@@ -81,6 +95,7 @@ __all__ = [
     "STFT_FFT_SIZE",
     "STFT_HOP_LENGTH",
     "LOG_LEVEL",
+    "GUI_REFRESH_MS",
     "API_HOST",
     "API_PORT",
     "API_MAX_PUSH_HZ",

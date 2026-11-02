@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 import time
 from contextlib import contextmanager
@@ -10,7 +11,7 @@ from typing import TYPE_CHECKING, Iterator
 
 import numpy as np
 
-from src.config import AUDIO_BLOCK_SIZE, DEFAULT_SAMPLE_RATE
+from src.config import AUDIO_BLOCK_SIZE, DEFAULT_SAMPLE_RATE, DEVICE_LATENCY, WASAPI_EXCLUSIVE
 from .audio_source import AudioChunk
 
 if TYPE_CHECKING:
@@ -21,6 +22,8 @@ if TYPE_CHECKING:
 # module on Windows - have no use for that.
 
 _COINIT_MULTITHREADED = 0
+
+logger = logging.getLogger(__name__)
 
 
 @contextmanager
@@ -51,12 +54,17 @@ class SoundDeviceSource:
     """Pull float32 blocks from an input or WASAPI loopback device."""
 
     def __init__(self, *, device: int | str, sample_rate: int = DEFAULT_SAMPLE_RATE,
-                 channels: int = 2, block_size: int = AUDIO_BLOCK_SIZE, loopback: bool = False):
+                 channels: int = 2, block_size: int = AUDIO_BLOCK_SIZE, loopback: bool = False,
+                 latency: str | float = DEVICE_LATENCY, wasapi_exclusive: bool = WASAPI_EXCLUSIVE):
         self.device = device
         self.sample_rate = sample_rate
         self.channels = channels
         self.block_size = block_size
         self.loopback = loopback
+        self.latency = latency
+        self.wasapi_exclusive = wasapi_exclusive
+        # Whether the opened stream actually got WASAPI exclusive mode
+        self.exclusive = False
         self._chunks: Queue[tuple[np.ndarray, float] | None] = Queue()
         self._stream: sd.InputStream | None = None
         self._closed = False
@@ -87,9 +95,7 @@ class SoundDeviceSource:
         # The stream is opened and closed by the iterating thread only; close()
         # just wakes it up with a sentinel.
         with _com_initialized():
-            self._stream = sd.InputStream(device=device, samplerate=self.sample_rate,
-                                          channels=self.channels, blocksize=self.block_size,
-                                          dtype="float32", callback=self._callback)
+            self._stream = self._open_stream(sd, device)
             self._input_latency = float(self._stream.latency)
             with self._stream:
                 while not self._closed:
@@ -102,6 +108,30 @@ class SoundDeviceSource:
                     samples, captured = item
                     yield AudioChunk(samples=samples, sample_rate=self.sample_rate, capture_time_s=captured)
             self._stream = None
+
+    def _open_stream(self, sd, device) -> "sd.InputStream":
+        def open_(extra_settings=None):
+            return sd.InputStream(device=device, samplerate=self.sample_rate, channels=self.channels,
+                                  blocksize=self.block_size, latency=self.latency, dtype="float32",
+                                  callback=self._callback, extra_settings=extra_settings)
+
+        if self.wasapi_exclusive and self._is_wasapi(sd, device):
+            try:
+                stream = open_(sd.WasapiSettings(exclusive=True))
+                self.exclusive = True
+                return stream
+            except sd.PortAudioError as exc:
+                logger.warning("WASAPI exclusive mode refused (%s); using shared mode", exc)
+        self.exclusive = False
+        return open_()
+
+    @staticmethod
+    def _is_wasapi(sd, device) -> bool:
+        try:
+            info = sd.query_devices(device, "input")
+            return "WASAPI" in sd.query_hostapis(info["hostapi"])["name"]
+        except (ValueError, sd.PortAudioError):
+            return False
 
     def _find_loopback_device(self, sounddevice_module) -> int:
         """Find a Windows loopback/stereo mix device index."""

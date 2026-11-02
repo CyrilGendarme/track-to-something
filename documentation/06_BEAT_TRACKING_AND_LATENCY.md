@@ -87,6 +87,15 @@ Measured through VB-Audio Virtual Cable (WASAPI, 48 kHz):
 The cable itself accounts for most of that path. Downstream latency has to be
 measured separately, e.g. by filming a click and the screen together.
 
+## Reducing latency
+
+Reactive values (onsets, kicks, levels) can't be predicted, so their latency
+is the capture path plus detection. `MOSHPRO_LATENCY_PROFILE=low` or `ultra`
+shrinks both at the cost of CPU (and, for `ultra`, exclusive use of a WASAPI
+input): see [Latency profiles](09_CONFIGURATION_AND_DIAGNOSTICS.md#latency-profiles).
+After changing profile, re-run the loopback test: the suggested
+`MOSHPRO_BEAT_LEAD_S` shrinks with the capture latency.
+
 ## Consuming beats
 
 - **In process**: the `"beat"` callback event, which arrives on time if

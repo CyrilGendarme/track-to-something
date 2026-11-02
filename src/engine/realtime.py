@@ -31,6 +31,7 @@ from src.config import (
     FREQ_BAND_MID_MIN,
     KICK_MIN_INTERVAL_S,
     ONSET_MIN_INTERVAL_S,
+    KICK_THRESHOLD_K,
     ONSET_THRESHOLD_K,
     REALTIME_FFT_SIZE,
     REALTIME_HOP_SIZE,
@@ -55,9 +56,15 @@ LEVEL_FLOOR = 1e-3
 # capped to stay sane if the clock mapping is off.
 MAX_LATENCY_COMPENSATION_S = 0.3
 # Kick attack localization: search the bass envelope of the last few hops
-# for where it first rises this fraction of the way to its peak.
+# (and at least ATTACK_SEARCH_S) for where it first rises this fraction of
+# the way to its peak.
 ATTACK_SEARCH_HOPS = 3
+ATTACK_SEARCH_S = 0.016
 ATTACK_FRACTION = 0.25
+# Spectral flux compares each frame with the one about this long before it,
+# whatever the hop size: with smaller hops, comparing consecutive frames would
+# spread an attack's flux over several hops and drown it in noise.
+FLUX_LAG_S = 0.0055
 # EMA rate of the real-time load figure (per hop).
 LOAD_SMOOTHING = 0.01
 # Kick strength jumps on each kick, then decays (seconds to fall by ~63%), so
@@ -177,8 +184,9 @@ class RealtimeAnalyzer:
 
         history = max(8, int(FLUX_HISTORY_S / self.hop_s))
         self._flux = _AdaptiveThreshold(history, ONSET_THRESHOLD_K)
-        self._bass_flux = _AdaptiveThreshold(history, ONSET_THRESHOLD_K)
-        self._prev_log_mag: np.ndarray | None = None
+        self._bass_flux = _AdaptiveThreshold(history, KICK_THRESHOLD_K)
+        # Previous log spectra, oldest first; the flux reference is the oldest
+        self._past_log_mags: deque[np.ndarray] = deque(maxlen=max(1, round(FLUX_LAG_S / self.hop_s)))
         self._last_onset_s = -math.inf
         self._last_kick_s = -math.inf
 
@@ -195,7 +203,7 @@ class RealtimeAnalyzer:
 
         # Low-pass for kick attack localization (only run on kick hops)
         self._kick_lowpass = scipy_signal.butter(2, FREQ_BAND_BASS_MAX, btype="low", fs=sample_rate, output="sos")
-        self._attack_span = min(fft_size, ATTACK_SEARCH_HOPS * hop_size)
+        self._attack_span = min(fft_size, max(ATTACK_SEARCH_HOPS * hop_size, round(ATTACK_SEARCH_S * sample_rate)))
 
     def _band_level(self, bins: slice) -> _BandLevel:
         return _BandLevel(bins, self._peak_decay, self._attack, self._release)
@@ -249,11 +257,12 @@ class RealtimeAnalyzer:
         log_mag = np.log1p(1000.0 * mag)
 
         # Half-wave rectified spectral flux (only energy *increases* count).
-        if self._prev_log_mag is None:
-            diff = np.zeros_like(log_mag)
+        past = self._past_log_mags
+        if past:
+            diff = np.maximum(log_mag - past[0], 0.0)
         else:
-            diff = np.maximum(log_mag - self._prev_log_mag, 0.0)
-        self._prev_log_mag = log_mag
+            diff = np.zeros_like(log_mag)
+        past.append(log_mag)
         flux = float(diff.sum()) / diff.size
         bass = diff[self.band_bins["bass"]]
         bass_flux = float(bass.sum()) / bass.size
