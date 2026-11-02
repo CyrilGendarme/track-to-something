@@ -1,7 +1,10 @@
 #!/usr/bin/env python
 """List all audio devices for debugging."""
 
+from src.diagnostics import utf8_stdout
 from src.gui.audio_devices import get_available_audio_devices
+
+utf8_stdout()
 
 devices = get_available_audio_devices()
 print(f"\nTotal devices: {len(devices)}\n")

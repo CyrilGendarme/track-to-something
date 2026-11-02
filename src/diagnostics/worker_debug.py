@@ -17,6 +17,8 @@ from pathlib import Path
 
 import soundfile as sf
 
+from src.diagnostics import utf8_stdout
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -110,6 +112,7 @@ def test_pipeline_with_logging(max_duration_s: float = 20.0):
 
 
 if __name__ == "__main__":
+    utf8_stdout()
     try:
         test_pipeline_with_logging()
     except Exception as e:

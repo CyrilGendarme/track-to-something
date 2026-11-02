@@ -32,6 +32,7 @@ import time
 import numpy as np
 
 from src.config import AUDIO_BLOCK_SIZE
+from src.diagnostics import utf8_stdout
 from src.diagnostics.signals import kick_track
 from src.engine import AudioPipeline, prewarm_job_processes
 from src.sources import AudioInputSource
@@ -215,6 +216,7 @@ def main() -> None:
     parser.add_argument("--block", type=int, default=AUDIO_BLOCK_SIZE)
     parser.add_argument("--lead", type=float, default=0.0, help="extra beat lead in seconds (MOSHPRO_BEAT_LEAD_S)")
     args = parser.parse_args()
+    utf8_stdout()
     logging.basicConfig(level=logging.WARNING)
     run(resolve_device(args.out, "output"), resolve_device(args.inp, "input"), args.bpm, args.seconds, args.block,
         args.lead)
