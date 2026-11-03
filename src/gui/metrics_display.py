@@ -117,7 +117,28 @@ class RealTimeMetricsDisplay(ttk.Frame):
         bpm_tab = self._create_bpm_tab()
         self.tabs["bpm"] = bpm_tab
         self.notebook.add(bpm_tab, text="BPM METHODS")
-    
+
+        # Every widget change costs a Windows repaint (at 125 Hz, ~30 changing
+        # widgets tripled the refresh period), so only the visible tab is
+        # updated, and only widgets whose shown value actually changed.
+        self._shown: dict[tuple[int, str], object] = {}
+        self.notebook.bind("<<NotebookTabChanged>>", lambda _event: self._refresh_visible_tab())
+
+    def _visible_tab(self) -> str | None:
+        selected = self.notebook.select()
+        return next((name for name, tab in self.tabs.items() if str(tab) == selected), None)
+
+    def _refresh_visible_tab(self) -> None:
+        self._update_display()
+        self._update_bpm_display()
+
+    def _set(self, widget: tk.Widget, option: str, value: object) -> None:
+        """``widget.config(option=value)``, skipped when it already shows that value."""
+        key = (id(widget), option)
+        if self._shown.get(key) != value:
+            self._shown[key] = value
+            widget.config(**{option: value})
+
     def _create_bpm_tab(self) -> ttk.Frame:
         """Create the tab listing each BPM detection method's estimate.
         
@@ -195,9 +216,9 @@ class RealTimeMetricsDisplay(ttk.Frame):
         with self.lock:
             estimates = dict(self.bpm_estimates)
         
-        if not estimates:
+        if not estimates or self._visible_tab() != "bpm":
             return
-        
+
         for method, estimate in estimates.items():
             self._ensure_bpm_row(method)
             value_label = self.bpm_value_labels.get(method)
@@ -211,16 +232,14 @@ class RealTimeMetricsDisplay(ttk.Frame):
                 text = f"{estimate.bpm:6.1f} BPM  (conf {estimate.confidence:.2f})"
             
             if value_label is not None:
-                value_label.config(text=text)
+                self._set(value_label, "text", text)
             if conf_bar is not None:
-                conf_bar.config(value=estimate.confidence * 100 if estimate.available else 0)
-        
+                self._set(conf_bar, "value", round(estimate.confidence * 100) if estimate.available else 0)
+
         if self.bpm_consensus_label is not None:
             bpm, confidence = consensus_bpm(estimates)
-            if bpm is None:
-                self.bpm_consensus_label.config(text="—")
-            else:
-                self.bpm_consensus_label.config(text=f"{bpm:6.1f} BPM  (conf {confidence:.2f})")
+            text = "—" if bpm is None else f"{bpm:6.1f} BPM  (conf {confidence:.2f})"
+            self._set(self.bpm_consensus_label, "text", text)
     
     def _create_tier_tab(self, tier: str) -> ttk.Frame:
         """Create a tab for displaying metrics from one tier.
@@ -330,9 +349,11 @@ class RealTimeMetricsDisplay(ttk.Frame):
         
         if not (fast or medium or slow):
             return
-        
+
+        visible = self._visible_tab()
         for metric_key, metric_def in self.metrics.items():
-            self._update_metric_display(metric_key, metric_def, fast, medium, slow)
+            if metric_def.category == visible:
+                self._update_metric_display(metric_key, metric_def, fast, medium, slow)
     
     def _update_metric_display(
         self,
@@ -397,12 +418,12 @@ class RealTimeMetricsDisplay(ttk.Frame):
         
         # Update label
         if metric_key in self.value_labels:
-            self.value_labels[metric_key].config(text=display_text)
-        
-        # Update progress bar (if enabled)
+            self._set(self.value_labels[metric_key], "text", display_text)
+
+        # Update progress bar (if enabled); whole percents, finer is invisible
         if metric_key in self.progress_bars and isinstance(value, (int, float)) and value is not None:
-            progress_value = min(100, max(0, (value / metric_def.bar_max) * 100))
-            self.progress_bars[metric_key].config(value=progress_value)
+            progress_value = round(min(100, max(0, (value / metric_def.bar_max) * 100)))
+            self._set(self.progress_bars[metric_key], "value", progress_value)
     
     def pack(self, **kwargs):
         """Override pack to also pack the frame."""

@@ -7,6 +7,18 @@ python -m src.gui.main_gui
 At launch, the GUI starts warming the BPM/key worker processes in the
 background, so the first estimates arrive within seconds of pressing Start.
 
+The GUI runs with the lowest-latency profile, `crazy_ultra_amazing_waw`, by
+default: high priority audio threads, WASAPI exclusive input, a 125 Hz
+display. It uses more CPU and, while analysis runs, no other app can record
+from the selected WASAPI input. For a lighter setup:
+
+```powershell
+$env:MOSHPRO_LATENCY_PROFILE = "balanced"   # or low / ultra
+python -m src.gui.main_gui
+```
+
+See [09](09_CONFIGURATION_AND_DIAGNOSTICS.md#latency-profiles).
+
 ## Left panel
 
 **Audio Input.** The **Device** dropdown lists:
@@ -17,7 +29,9 @@ background, so the first estimates arrive within seconds of pressing Start.
 An application entry checks the app is running, then captures the **whole
 system** loopback; it is not isolated to that app. **🔄 Refresh** re-scans.
 **Device Info** shows the channels, sample rate and type; the pipeline runs
-at the device's sample rate.
+at the device's sample rate. Each entry also names its driver (MME, WASAPI,
+...). With the default profile, WASAPI inputs come first and the first one is
+preselected: pick the one your music is routed to (e.g. *CABLE Output*).
 
 **Custom Frequency Range.** Tick **Track this band** to follow one extra
 band of your choice, e.g. 40–120 Hz for the kick or 2–5 kHz for vocals and

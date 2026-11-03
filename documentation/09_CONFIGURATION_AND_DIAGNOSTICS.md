@@ -129,9 +129,12 @@ Limits found while tuning (so you don't have to):
   starved the real-time thread of the GIL (audio age 148 ms); crazy runs it
   in a worker process.
 
-Note: the GUI currently lists only 44.1 kHz devices, which on many machines
-means MME/DirectSound entries; WASAPI devices running at 48 kHz (where
-exclusive mode applies) are only reachable from code or the diagnostics.
+**The GUI defaults to `crazy_ultra_amazing_waw`** (the engine and scripts
+default to `balanced`). Set `MOSHPRO_LATENCY_PROFILE` before launching it to
+pick another. With a profile that uses WASAPI exclusive mode, the GUI lists
+WASAPI inputs first, at their native sample rate (otherwise it shows 44.1 kHz
+devices only). Measured in the GUI on a VB-Audio cable: audio age 3 ms,
+real-time load 25%, 0 overflows, GUI refreshed every 8.3 ms.
 
 
 ## Tests

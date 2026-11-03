@@ -6,7 +6,7 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
-from src.config import DEFAULT_SAMPLE_RATE
+from src.config import DEFAULT_SAMPLE_RATE, WASAPI_EXCLUSIVE
 
 logger = logging.getLogger(__name__)
 
@@ -20,20 +20,31 @@ class AudioDevice:
     sample_rate: int
     device_type: str  # "input", "output", "loopback", "application"
     application_name: Optional[str] = None  # Process name, set only when device_type == "application"
+    host_api: str = ""  # e.g. "MME", "Windows WASAPI"
+
+    @property
+    def is_wasapi(self) -> bool:
+        return "WASAPI" in self.host_api
     
     def __str__(self) -> str:
         if self.device_type == "application":
             return f"🎧 {self.name} (Application Audio)"
-        return f"{self.name} ({self.device_type}, {self.channels}ch, {self.sample_rate}Hz)"
+        api = f", {self.host_api.removeprefix('Windows ')}" if self.host_api else ""
+        return f"{self.name} ({self.device_type}, {self.channels}ch, {self.sample_rate}Hz{api})"
 
 
-def _filter_duplicate_devices(devices: list[AudioDevice]) -> list[AudioDevice]:
+def _filter_duplicate_devices(devices: list[AudioDevice], prefer_wasapi: bool = False) -> list[AudioDevice]:
     """Filter and deduplicate audio devices.
     
     Filtering rules:
     1. Keep only 44100Hz sample rate devices
     2. Keep only one VB-Audio device (prefer the first one found)
     3. For duplicate devices with 1-2 channels, keep only the mono (1-channel) version
+
+    With ``prefer_wasapi`` (latency profiles using WASAPI exclusive mode),
+    WASAPI inputs are kept at any sample rate and listed first, so the kept
+    VB-Audio device is the WASAPI one: exclusive mode and the smallest
+    driver buffers only exist there.
     
     Args:
         devices: List of discovered audio devices
@@ -52,8 +63,10 @@ def _filter_duplicate_devices(devices: list[AudioDevice]) -> list[AudioDevice]:
     devices = [d for d in devices if all(trash not in d.name for trash in trash_name_regex)]
     
     
-    # Rule 2: Filter to 44100Hz only
-    devices = [d for d in devices if d.sample_rate == 44100]
+    # Rule 2: Filter to 44100Hz only (WASAPI inputs exempt when preferred)
+    devices = [d for d in devices if d.sample_rate == 44100 or (prefer_wasapi and d.is_wasapi)]
+    if prefer_wasapi:
+        devices.sort(key=lambda d: not d.is_wasapi)  # stable: WASAPI first, order kept
     logger.info(f"After 44100Hz filter: {len(devices)})")
     
     # Rule 3: Keep only one VB-Audio device
@@ -122,6 +135,7 @@ def get_available_audio_devices() -> list[AudioDevice]:
     try:
         import sounddevice as sd
         
+        host_apis = [api["name"] for api in sd.query_hostapis()]
         # Get all devices
         for i, device_info in enumerate(sd.query_devices()):
             if device_info['max_input_channels'] > 0:
@@ -138,12 +152,13 @@ def get_available_audio_devices() -> list[AudioDevice]:
                     channels=device_info['max_input_channels'],
                     sample_rate=int(device_info['default_samplerate']),
                     device_type=device_type,
+                    host_api=host_apis[device_info['hostapi']],
                 ))
         
         logger.info(f"Found {len(devices)} audio input devices (before filtering)")
         
         # Apply filtering rules
-        devices = _filter_duplicate_devices(devices)
+        devices = _filter_duplicate_devices(devices, prefer_wasapi=WASAPI_EXCLUSIVE)
             
     except ImportError:
         logger.warning("sounddevice not available, using fallback audio devices")

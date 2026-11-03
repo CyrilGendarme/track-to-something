@@ -12,7 +12,9 @@ pip install -r requirements.txt
 python -m src.gui.main_gui
 ```
 
-Pick an audio input, press **Start**, and optionally enable the local API.
+Pick an audio input, press **Start**, and optionally enable the local API. The GUI runs
+with the lowest-latency profile (`crazy_ultra_amazing_waw`) by default; set
+`MOSHPRO_LATENCY_PROFILE=balanced` before launching for a lighter one.
 
 ## Using the engine from code
 

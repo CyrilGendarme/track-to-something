@@ -599,6 +599,7 @@ class AudioAnalysisGUI(tk.Tk):
                 audio_source = AudioInputSource(
                     device=self.selected_device.device_id,
                     sample_rate=self.selected_device.sample_rate,
+                    channels=max(1, min(2, self.selected_device.channels)),
                     block_size=AUDIO_BLOCK_SIZE,
                 )
             
