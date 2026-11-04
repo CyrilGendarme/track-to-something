@@ -44,8 +44,10 @@ ring buffer. On `stop()` it closes the source, so a blocking device read
 returns.
 
 ### Live sources — `src/sources/live_audio.py`
-`SoundDeviceSource` (and `AudioInputSource` / `ApplicationAudioSource`) wrap a
-PortAudio input stream:
+`SoundDeviceSource` (and `AudioInputSource`) wrap a PortAudio input stream.
+Output loopback (`SystemLoopbackSource`, `ApplicationAudioSource`) uses the
+SoundCard package instead, since PortAudio can't record an output device.
+For PortAudio streams:
 
 - The PortAudio callback only copies the block and its capture time into a
   queue.

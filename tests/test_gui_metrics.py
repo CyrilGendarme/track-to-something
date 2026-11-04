@@ -13,8 +13,8 @@ from src.analysis.tiers.features import FastFeatures, MediumFeatures
 def display():
     try:
         root = tk.Tk()
-    except tk.TclError:
-        pytest.skip("no display")
+    except tk.TclError as exc:
+        pytest.skip(f"no display ({exc})")
     root.withdraw()
     from src.gui.metrics_display import RealTimeMetricsDisplay
 

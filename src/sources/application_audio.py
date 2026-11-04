@@ -4,16 +4,21 @@ from __future__ import annotations
 
 import platform
 
-from .live_audio import SoundDeviceSource
+from .system_loopback import SystemLoopbackSource
 
 
-class ApplicationAudioSource(SoundDeviceSource):
-    """Capture a laptop application's output through a loopback device."""
+class ApplicationAudioSource(SystemLoopbackSource):
+    """Capture what a running application plays, via its output device's loopback.
 
-    def __init__(self, *, application_name: str, device: int | str | None = None, **kwargs):
+    Windows mixes every application on an output device, so this records the
+    whole mix of that device (the default output unless ``device`` names
+    another), not the application alone.
+    """
+
+    def __init__(self, *, application_name: str, device: str | None = None, **kwargs):
         self.application_name = application_name
         self._validate_application()
-        super().__init__(device=device, loopback=True, **kwargs)
+        super().__init__(speaker=device, **kwargs)
 
     def _validate_application(self) -> None:
         """Ensure the requested Windows application is currently running."""

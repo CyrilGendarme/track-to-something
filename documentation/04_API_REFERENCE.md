@@ -53,7 +53,8 @@ before the first result), `get_bpm_estimates() -> dict[str, BPMEstimate]`,
 | Class | Use |
 |---|---|
 | `AudioInputSource(device=…, sample_rate=…, block_size=512, channels=2)` | an input device (index or name) |
-| `ApplicationAudioSource(application_name=…, …)` | checks the app is running, then captures **system** loopback (not isolated per app) |
+| `SystemLoopbackSource(speaker=None, sample_rate=48000, channels=2, block_size=…)` | what an output device plays (WASAPI loopback via `soundcard`); `speaker` is an id or name substring, None for the default output |
+| `ApplicationAudioSource(application_name=…, device=None, …)` | checks the app is running, then records its output device's loopback (the device's whole mix, not the app alone) |
 | `TrackAudioSource(block_size=…, audio_roots=…)` | reads the track the Rekordbox DataBridge reports as loaded |
 | `AudioChunk(samples, sample_rate, capture_time_s=None)` | the unit sources yield; `capture_time_s` is the Unix time of the first sample, if known |
 

@@ -23,11 +23,29 @@ See [09](09_CONFIGURATION_AND_DIAGNOSTICS.md#latency-profiles).
 
 **Audio Input.** The **Device** dropdown lists:
 
-- input devices: microphones, interfaces, virtual cable outputs, Stereo Mix;
-- running applications that have a Windows audio session (needs `pycaw`).
+- input devices: microphones (including the laptop's built-in microphone
+  array), interfaces, virtual cable outputs, Stereo Mix;
+- **🔊 output devices** ("what's playing"): records what a speaker or headset
+  plays, through WASAPI loopback (needs `soundcard`);
+- **🎧 running applications** that have a Windows audio session (needs
+  `pycaw`).
 
-An application entry checks the app is running, then captures the **whole
-system** loopback; it is not isolated to that app. **🔄 Refresh** re-scans.
+An application entry checks the app is running, then records the default
+output device: you get that app's sound **mixed with anything else playing
+on the same device** (Windows doesn't separate apps there). For one app
+alone, route it to its own output, e.g. the VB-Audio cable in Windows'
+*App volume and device preferences*, and select *CABLE Output*. **🔄 Refresh**
+re-scans.
+
+Built-in microphones: in shared mode Windows applies its voice processing
+(noise suppression), which removes music. The default profile opens WASAPI
+inputs in exclusive mode, which records the raw microphone. With other
+profiles, turn off *Audio enhancements* for the microphone in Windows' sound
+settings.
+
+Loopback entries can't read the device's timestamps, so their *Audio age*
+reads lower than it really is (by the device's buffering, ~10–20 ms); add it
+to `MOSHPRO_BEAT_LEAD_S` if beats must be exact.
 **Device Info** shows the channels, sample rate and type; the pipeline runs
 at the device's sample rate. Each entry also names its driver (MME, WASAPI,
 ...). With the default profile, WASAPI inputs come first and the first one is

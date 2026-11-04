@@ -13,9 +13,9 @@ from typing import Optional, Callable
 from src.config import AUDIO_BLOCK_SIZE, GUI_REFRESH_MS, HIGH_RES_TIMER, JOBS_USE_PROCESSES, API_HOST, API_PORT
 from src.engine import AudioPipeline, FeatureCache, prewarm_job_processes
 from src.engine.priority import enable_high_resolution_timer
-from src.sources import AudioInputSource, ApplicationAudioSource, AudioChunk
+from src.sources import AudioInputSource, ApplicationAudioSource, AudioChunk, SystemLoopbackSource
 from src.gui.theme import apply_theme, BG, BG_PANEL, BG_CARD, FG, FG_DIM, ACCENT, ACCENT2, FONT_UI, FONT_BOLD, FONT_TITLE
-from src.gui.audio_devices import get_available_audio_devices, get_running_applications, AudioDevice
+from src.gui.audio_devices import get_available_audio_devices, get_loopback_devices, get_running_applications, AudioDevice
 from src.gui.analysis_logger import AnalysisLogger
 from src.gui.metrics_display import RealTimeMetricsDisplay
 from src.analysis.tiers.features import FastFeatures, MediumFeatures, SlowFeatures
@@ -195,8 +195,8 @@ class AudioInputSelector(ttk.Frame):
         self._update_device_info()
     
     def _load_devices(self) -> list[AudioDevice]:
-        """List audio devices followed by running applications' audio sessions."""
-        return get_available_audio_devices() + get_running_applications()
+        """List input devices, output loopbacks, then running applications."""
+        return get_available_audio_devices() + get_loopback_devices() + get_running_applications()
     
     def _on_selection(self, event) -> None:
         """Handle device selection change."""
@@ -592,6 +592,12 @@ class AudioAnalysisGUI(tk.Tk):
             if self.selected_device.device_type == "application":
                 audio_source = ApplicationAudioSource(
                     application_name=self.selected_device.application_name,
+                    sample_rate=self.selected_device.sample_rate,
+                    block_size=AUDIO_BLOCK_SIZE,
+                )
+            elif self.selected_device.loopback_speaker is not None:
+                audio_source = SystemLoopbackSource(
+                    speaker=self.selected_device.loopback_speaker,
                     sample_rate=self.selected_device.sample_rate,
                     block_size=AUDIO_BLOCK_SIZE,
                 )

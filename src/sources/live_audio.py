@@ -25,6 +25,9 @@ _COINIT_MULTITHREADED = 0
 
 logger = logging.getLogger(__name__)
 
+# Block size used when a driver rejects a low-latency profile's settings
+SAFE_BLOCK_SIZE = 512
+
 
 @contextmanager
 def _com_initialized():
@@ -115,7 +118,12 @@ class SoundDeviceSource:
                                   blocksize=self.block_size, latency=self.latency, dtype="float32",
                                   callback=self._callback, extra_settings=extra_settings)
 
-        if self.wasapi_exclusive and self._is_wasapi(sd, device):
+        is_wasapi = self._is_wasapi(sd, device)
+        if not is_wasapi and self.latency == 0:
+            # "0" means "the driver's minimum" on WASAPI; DirectSound instead
+            # opens without error and never delivers audio
+            self.latency = "low"
+        if self.wasapi_exclusive and is_wasapi:
             try:
                 stream = open_(sd.WasapiSettings(exclusive=True))
                 self.exclusive = True
@@ -123,7 +131,17 @@ class SoundDeviceSource:
             except sd.PortAudioError as exc:
                 logger.warning("WASAPI exclusive mode refused (%s); using shared mode", exc)
         self.exclusive = False
-        return open_()
+        try:
+            return open_()
+        except sd.PortAudioError as exc:
+            # Some drivers (e.g. WDM-KS) reject the small blocks / minimum
+            # buffering of the low-latency profiles: retry with safe values.
+            if (self.block_size, self.latency) == (SAFE_BLOCK_SIZE, "high"):
+                raise
+            logger.warning("Device refused block %d / latency %r (%s); retrying with block %d / 'high'",
+                           self.block_size, self.latency, exc, SAFE_BLOCK_SIZE)
+            self.block_size, self.latency = SAFE_BLOCK_SIZE, "high"
+            return open_()
 
     @staticmethod
     def _is_wasapi(sd, device) -> bool:

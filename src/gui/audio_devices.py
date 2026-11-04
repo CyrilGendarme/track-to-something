@@ -21,6 +21,7 @@ class AudioDevice:
     device_type: str  # "input", "output", "loopback", "application"
     application_name: Optional[str] = None  # Process name, set only when device_type == "application"
     host_api: str = ""  # e.g. "MME", "Windows WASAPI"
+    loopback_speaker: Optional[str] = None  # output device id, for output loopback entries
 
     @property
     def is_wasapi(self) -> bool:
@@ -29,6 +30,8 @@ class AudioDevice:
     def __str__(self) -> str:
         if self.device_type == "application":
             return f"🎧 {self.name} (Application Audio)"
+        if self.loopback_speaker is not None:
+            return f"🔊 {self.name} (what's playing, {self.sample_rate}Hz)"
         api = f", {self.host_api.removeprefix('Windows ')}" if self.host_api else ""
         return f"{self.name} ({self.device_type}, {self.channels}ch, {self.sample_rate}Hz{api})"
 
@@ -57,7 +60,7 @@ def _filter_duplicate_devices(devices: list[AudioDevice], prefer_wasapi: bool = 
 
     # Rule 1: Filter out "well know" trash devices
     trash_name_regex = [
-        "Microphone Array (AMD Audio Dev",
+        # "Microphone Array (AMD Audio Dev" is the laptop's built-in microphone: keep it
                         # "Microphone (Realtek HD Audio Mic"
                         "Input (VB-Audio)"]
     devices = [d for d in devices if all(trash not in d.name for trash in trash_name_regex)]
@@ -203,14 +206,65 @@ def get_available_audio_devices() -> list[AudioDevice]:
     ]
 
 
+def _output_mix_rates() -> dict[str, int]:
+    """Shared-mode mix rate of each WASAPI output, by name (loopback runs at it)."""
+    try:
+        import sounddevice as sd
+
+        apis = sd.query_hostapis()
+        return {
+            info["name"]: int(info["default_samplerate"])
+            for info in sd.query_devices()
+            if info["max_output_channels"] > 0 and "WASAPI" in apis[info["hostapi"]]["name"]
+        }
+    except Exception:  # noqa: BLE001 - only used to pick a better default rate
+        return {}
+
+
+def get_loopback_devices() -> list[AudioDevice]:
+    """One entry per output device, capturing what it plays (WASAPI loopback).
+
+    VB-Audio outputs are left out: recording "CABLE Output" gives the same audio.
+    """
+    try:
+        from src.sources.system_loopback import list_loopback_speakers
+
+        speakers = list_loopback_speakers()
+    except Exception as e:  # noqa: BLE001 - SoundCard missing or no WASAPI
+        logger.warning(f"Output loopback unavailable: {e}")
+        return []
+    rates = _output_mix_rates()
+    return [
+        AudioDevice(
+            device_id=-1,
+            name=name,
+            channels=2,
+            sample_rate=rates.get(name, 48000),
+            device_type="loopback",
+            host_api="Windows WASAPI",
+            loopback_speaker=speaker_id,
+        )
+        for speaker_id, name in speakers
+        if "vb-audio" not in name.casefold()
+    ]
+
+
 def get_running_applications() -> list[AudioDevice]:
     """Discover running applications that currently have a Windows audio session.
 
-    Each entry captures whole-system loopback audio when selected (see
-    ``src.sources.ApplicationAudioSource``); it is not isolated per-process.
-    Returns an empty list on non-Windows platforms or if pycaw isn't installed.
+    Each entry records the default output device's loopback when selected
+    (see ``src.sources.ApplicationAudioSource``): the app's sound mixed with
+    anything else playing there. Returns an empty list on non-Windows
+    platforms or if pycaw isn't installed.
     """
     apps: list[AudioDevice] = []
+    default_rate = DEFAULT_SAMPLE_RATE
+    try:
+        import soundcard
+
+        default_rate = _output_mix_rates().get(soundcard.default_speaker().name, 48000)
+    except Exception:  # noqa: BLE001 - keep the configured default
+        pass
     try:
         from pycaw.utils import AudioUtilities
 
@@ -235,7 +289,7 @@ def get_running_applications() -> list[AudioDevice]:
                 device_id=-1,
                 name=label,
                 channels=2,
-                sample_rate=DEFAULT_SAMPLE_RATE,
+                sample_rate=default_rate,
                 device_type="application",
                 application_name=process_name,
             ))

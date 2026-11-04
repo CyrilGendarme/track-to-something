@@ -199,6 +199,9 @@ pytest dumps every thread's stack.
 |---|---|
 | "Unanticipated host error" when starting | WASAPI stream opened without COM on the thread; fixed in `SoundDeviceSource`. If it persists, the device is held exclusively by another app |
 | Raw energy stuck at ~0.001; kick strength, beat phase/lock, band levels, amplitude/RMS/peak stay at 0, while onset strength, BPM or key still move | no music reaches the selected input (raw energy 0.001 = −60 dBFS, a noise floor); the Performance panel's *Input level* is flagged red. Pick the input the music is actually routed to (e.g. the virtual cable the player outputs to), or enable Stereo Mix. The ratio-based values move on noise too, so they don't prove a signal |
+| Built-in microphone near −100 dBFS while music plays in the room | Windows' voice processing (noise suppression) removes music in shared mode: use a WASAPI entry with exclusive mode (the GUI default), or turn off *Audio enhancements* for that microphone |
+| A 🎧 application entry also picks up other apps | expected: it records the output device's whole mix; route the app alone to the VB-Audio cable and select *CABLE Output* |
+| A device opens with a "Device refused block … retrying" warning | that driver (e.g. WDM-KS) can't run the profile's small buffers; it runs with 512-sample blocks instead (shown in the Performance panel) |
 | `ValueError: Source sample rate … does not match` | pass the device's sample rate to `AudioPipeline` |
 | BPM/key slow to appear | worker processes still warming (librosa takes seconds to load on first use); call `prewarm_job_processes()` early |
 | `hops_skipped` > 0, a large `max_backlog_s` or a high `load` | the real-time thread is starved of CPU; close heavy apps or raise `MOSHPRO_REALTIME_HOP_SIZE` |
